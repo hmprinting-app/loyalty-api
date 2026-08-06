@@ -1,0 +1,85 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Tier {
+  BRONZE_PAPER // 0 - 4.999
+  SILVER_IVORY // 5.000 - 14.999 (multiplier 1.2x)
+  GOLD_FOIL // 15.000+ (multiplier 1.5x)
+}
+
+enum TxType {
+  EARN_MANUAL
+  EARN_AUTO_KANBAN // dipakai nanti pas integrasi sistem produksi aktif
+  EARN_WELCOME
+  EARN_TRANSITION
+  REDEEM_VOUCHER
+  ADJUSTMENT
+}
+
+model Member {
+  id                  String    @id @default(cuid())
+  phone               String    @unique // format 628xxxxxxxxxx
+  name                String
+  magicToken          String    @unique @default(cuid())
+  tier                Tier      @default(BRONZE_PAPER)
+  spendablePoints     Int       @default(0)
+  lifetimePoints      Int       @default(0)
+  welcomeBonusClaimed Boolean   @default(false)
+  lastLoginAt         DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  transactions PointsTransaction[]
+  redemptions  Redemption[]
+
+  @@index([magicToken])
+}
+
+model PointsTransaction {
+  id             String   @id @default(cuid())
+  memberId       String
+  member         Member   @relation(fields: [memberId], references: [id])
+  type           TxType
+  spendableDelta Int // bisa negatif (saat redeem)
+  lifetimeDelta  Int // 0 saat redeem, poin history tetap
+  note           String?
+  refOrderId     String? // buat nyambung ke order Kanban nanti
+  createdBy      String // "system" atau nama admin
+  createdAt      DateTime @default(now())
+
+  @@index([memberId])
+}
+
+model Voucher {
+  id         String   @id @default(cuid())
+  title      String
+  costPoints Int
+  stock      Int
+  minSpend   String?
+  code       String
+  tierMin    Tier? // null = semua tier boleh tukar
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  redemptions Redemption[]
+}
+
+model Redemption {
+  id          String   @id @default(cuid())
+  memberId    String
+  member      Member   @relation(fields: [memberId], references: [id])
+  voucherId   String
+  voucher     Voucher  @relation(fields: [voucherId], references: [id])
+  pointsSpent Int
+  redeemCode  String   @unique // ditunjukin admin/kasir saat customer klaim
+  status      String   @default("pending") // pending | used | expired
+  redeemedAt  DateTime @default(now())
+
+  @@index([memberId])
+}

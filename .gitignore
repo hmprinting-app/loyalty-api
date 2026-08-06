@@ -1,0 +1,5 @@
+node_modules
+dist
+.env
+*.log
+scripts/import-output.csv
