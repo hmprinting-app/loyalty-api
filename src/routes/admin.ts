@@ -495,4 +495,114 @@ export default async function adminRoutes(app: FastifyInstance) {
       });
     },
   );
+
+  // ============================================================
+  // BARU — Pembersih data demo (lawan dari seed-referral-tier-demo).
+  // Menghapus SEMUA member yang namanya diawali "Demo " beserta seluruh data
+  // terkait (PointsTransaction, ReferralConversion, Redemption, CashoutRequest,
+  // CloudFile). Aman dipanggil berkali-kali — kalau tidak ada data demo yang
+  // ketemu, cuma balik "deleted: 0" tanpa efek apa-apa.
+  // ============================================================
+  app.post("/api/admin/maintenance/cleanup-referral-tier-demo", async (req, reply) => {
+    const demoMembers = await prisma.member.findMany({
+      where: { name: { startsWith: "Demo " } },
+      select: { id: true, name: true, phone: true },
+    });
+
+    if (demoMembers.length === 0) {
+      return reply.send({ deleted: 0, message: "Tidak ada data demo yang ditemukan — sudah bersih." });
+    }
+
+    const demoIds = demoMembers.map((m: { id: string }) => m.id);
+
+    const result = await prisma.$transaction(async (tx: any) => {
+      // Urutan hapus tidak krusial untuk relasi Member<->Member (referredById
+      // pakai ON DELETE SET NULL), tapi tetap hapus child records dulu biar
+      // aman kalau suatu saat constraint-nya diubah jadi RESTRICT.
+      await tx.referralConversion.deleteMany({
+        where: { OR: [{ referrerId: { in: demoIds } }, { referredMemberId: { in: demoIds } }] },
+      });
+      await tx.pointsTransaction.deleteMany({ where: { memberId: { in: demoIds } } });
+      await tx.redemption.deleteMany({ where: { memberId: { in: demoIds } } });
+      await tx.cashoutRequest.deleteMany({ where: { memberId: { in: demoIds } } });
+      await tx.cloudFile.deleteMany({ where: { memberId: { in: demoIds } } });
+      return tx.member.deleteMany({ where: { id: { in: demoIds } } });
+    });
+
+    return reply.send({
+      deleted: result.count,
+      deletedMembers: demoMembers.map((m: { name: string; phone: string }) => ({ name: m.name, phone: m.phone })),
+      message: `${result.count} member demo & seluruh data terkait (transaksi, conversion, dll) berhasil dihapus.`,
+    });
+  });
+
+  // ============================================================
+  // BARU — Webhook untuk integrasi OTOMATIS dengan sistem Kanban produksi.
+  //
+  // Ini fondasi supaya update status TIDAK PERLU manual satu-satu lewat
+  // dashboard admin. Alurnya nanti:
+  //   1. Waktu order pertama customer referral tercatat (via addPoints
+  //      type EARN_AUTO_KANBAN), Kanban WAJIB kirim `refOrderId` = ID order
+  //      di sistem Kanban kamu sendiri (field ini sudah ada di schema).
+  //   2. Begitu admin klik "Selesai Produksi" / "Lunas" di Kanban, sistem
+  //      Kanban tinggal panggil endpoint INI dengan `refOrderId` yang sama
+  //      — TIDAK perlu tahu ID internal ReferralConversion sama sekali.
+  //   3. Gembok poin referrer otomatis kebuka begitu kedua status jadi
+  //      COMPLETED & PAID — sama persis logic-nya dengan update manual.
+  //
+  // Kalau refOrderId yang dikirim TERNYATA bukan order dari customer
+  // referral (mayoritas order memang bukan referral), endpoint ini TIDAK
+  // error — cuma balas `skipped: true` karena memang tidak ada yang perlu
+  // diupdate. Jadi Kanban bisa panggil endpoint ini untuk SEMUA order tanpa
+  // perlu tahu duluan mana yang referral mana yang bukan.
+  // ============================================================
+  app.post<{
+    Params: { refOrderId: string };
+    Body: { orderFulfillmentStatus?: OrderFulfillmentStatus; orderPaymentStatus?: OrderPaymentStatus };
+  }>("/api/admin/referral-conversions/by-order/:refOrderId/status", async (req, reply) => {
+    const { orderFulfillmentStatus, orderPaymentStatus } = req.body;
+
+    if (orderFulfillmentStatus && !VALID_FULFILLMENT.includes(orderFulfillmentStatus)) {
+      return reply.code(400).send({ error: `orderFulfillmentStatus harus salah satu dari: ${VALID_FULFILLMENT.join(", ")}` });
+    }
+    if (orderPaymentStatus && !VALID_PAYMENT.includes(orderPaymentStatus)) {
+      return reply.code(400).send({ error: `orderPaymentStatus harus salah satu dari: ${VALID_PAYMENT.join(", ")}` });
+    }
+    if (!orderFulfillmentStatus && !orderPaymentStatus) {
+      return reply.code(400).send({ error: "Isi minimal salah satu: orderFulfillmentStatus atau orderPaymentStatus" });
+    }
+
+    const conversion = await prisma.referralConversion.findFirst({
+      where: { refOrderId: req.params.refOrderId },
+    });
+
+    if (!conversion) {
+      return reply.send({
+        skipped: true,
+        message: "Order ini tidak terkait referral manapun (customer non-referral) — tidak ada yang perlu diupdate.",
+      });
+    }
+
+    try {
+      const updated = await updateReferralConversionStatus({
+        conversionId: conversion.id,
+        orderFulfillmentStatus,
+        orderPaymentStatus,
+        updatedBy: "kanban-webhook",
+      });
+      const unlocked = updated.orderFulfillmentStatus === "COMPLETED" && updated.orderPaymentStatus === "PAID";
+      return reply.send({
+        skipped: false,
+        conversion: updated,
+        message: unlocked
+          ? "Order sudah COMPLETED & PAID — poin referral siap dicairkan."
+          : "Status diperbarui. Poin masih terkunci sampai order COMPLETED & PAID.",
+      });
+    } catch (err: any) {
+      if (err instanceof ConversionNotFoundError) {
+        return reply.code(404).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
 }
