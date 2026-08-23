@@ -1,8 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { prisma } from "../lib/prisma";
 import { serializeMember } from "./auth";
-import { CASHOUT_MIN_POINTS, CASHOUT_MIN_RUPIAH } from "../lib/points";
-import { POINT_VALUE_RUPIAH, maxRedeemPercentFor } from "../lib/tier";
+import { CASHOUT_MIN_POINTS, CASHOUT_MIN_RUPIAH, RedeemError, requestCashout } from "../lib/points";
 
 export default async function memberRoutes(app: FastifyInstance) {
   // Semua route di sini butuh Bearer JWT (didapat dari /api/auth/login)
@@ -36,7 +35,9 @@ export default async function memberRoutes(app: FastifyInstance) {
   });
 
   // ============================================================
-  // BARU: Referral Dashboard
+  // Referral Dashboard — sekarang menampilkan status GEMBOK per teman:
+  // apakah order pertamanya sudah COMPLETED & PAID (poin siap cair) atau
+  // masih PENDING (poin sudah masuk saldo tapi belum bisa di-cashout).
   // ============================================================
   app.get("/api/member/referral", async (req, reply) => {
     const { memberId } = req.user as { memberId: string };
@@ -49,7 +50,15 @@ export default async function memberRoutes(app: FastifyInstance) {
             id: true,
             name: true,
             createdAt: true,
-            transactions: { where: { type: "EARN_AUTO_KANBAN" }, select: { id: true }, take: 1 },
+            referralConversionAsReferred: {
+              select: {
+                pointsAwarded: true,
+                commissionPercent: true,
+                orderFulfillmentStatus: true,
+                orderPaymentStatus: true,
+                pointsUnlockedAt: true,
+              },
+            },
           },
         },
       },
@@ -61,32 +70,47 @@ export default async function memberRoutes(app: FastifyInstance) {
       _sum: { spendableDelta: true },
     });
 
+    const cashoutEligiblePoints = Math.max(0, member.referralPointsBalance - member.referralPointsLocked);
+
     return reply.send({
       referralCode: member.referralCode,
       referralLink: member.referralCode
         ? `https://vip.hmprinting.id/daftar?ref=${member.referralCode}`
         : null,
       referralPointsBalance: member.referralPointsBalance,
+      referralPointsLocked: member.referralPointsLocked,
+      cashoutEligiblePoints,
       totalReferralPointsEarned: totalReferralEarned._sum.spendableDelta ?? 0,
       totalFriendsInvited: member.referrals.length,
-      friendsWhoOrdered: member.referrals.filter((r) => r.transactions.length > 0).length,
-      friends: member.referrals.map((r) => ({
-        name: r.name,
-        joinedAt: r.createdAt,
-        hasOrdered: r.transactions.length > 0,
-      })),
+      friendsWhoOrdered: member.referrals.filter((r: any) => r.referralConversionAsReferred).length,
+      friends: member.referrals.map((r: any) => {
+        const conv = r.referralConversionAsReferred;
+        const isUnlocked = conv && conv.orderFulfillmentStatus === "COMPLETED" && conv.orderPaymentStatus === "PAID";
+        return {
+          name: r.name,
+          joinedAt: r.createdAt,
+          hasOrdered: !!conv,
+          pointsAwarded: conv?.pointsAwarded ?? 0,
+          commissionPercent: conv?.commissionPercent ?? null,
+          orderFulfillmentStatus: conv?.orderFulfillmentStatus ?? null,
+          orderPaymentStatus: conv?.orderPaymentStatus ?? null,
+          cashoutStatus: !conv ? "belum_order" : isUnlocked ? "siap_cair" : "terkunci",
+        };
+      }),
       cashout: {
         minPoints: CASHOUT_MIN_POINTS,
         minRupiah: CASHOUT_MIN_RUPIAH,
-        eligible: member.referralPointsBalance >= CASHOUT_MIN_POINTS,
+        eligible: cashoutEligiblePoints >= CASHOUT_MIN_POINTS,
       },
     });
   });
 
   // ============================================================
-  // BARU: Request Cashout poin referral ke bank/e-wallet
-  // Status selalu "pending" dulu — admin approve manual lewat
-  // POST /api/admin/cashouts/:id/approve (lihat routes/admin.ts)
+  // Request Cashout poin referral ke bank/e-wallet.
+  // Validasi STRICT GEMBOK ada di requestCashout() (src/lib/points.ts):
+  // hanya poin dari teman yang order-nya sudah COMPLETED & PAID yang boleh
+  // dicairkan, minimal 500 poin. Status request selalu "pending" dulu —
+  // admin approve manual lewat POST /api/admin/cashouts/:id/approve.
   // ============================================================
   app.post<{
     Body: {
@@ -100,115 +124,33 @@ export default async function memberRoutes(app: FastifyInstance) {
     const { memberId } = req.user as { memberId: string };
     const { points, bankName, accountNumber, accountName, ewalletType } = req.body;
 
-    if (!points || points < CASHOUT_MIN_POINTS) {
-      return reply.code(400).send({
-        error: `Minimal cashout ${CASHOUT_MIN_POINTS} poin (Rp${CASHOUT_MIN_RUPIAH.toLocaleString("id-ID")}).`,
+    try {
+      const cashout = await requestCashout({
+        memberId,
+        points,
+        bankName,
+        accountNumber,
+        accountName,
+        ewalletType,
       });
+
+      return reply.send({
+        cashoutId: cashout.id,
+        pointsRequested: cashout.pointsRequested,
+        amountRupiah: cashout.amountRupiah,
+        status: cashout.status,
+        message: "Request cashout berhasil dikirim, akan diproses admin 1-2 hari kerja.",
+      });
+    } catch (err: any) {
+      if (err instanceof RedeemError) {
+        return reply.code(400).send({ error: err.message });
+      }
+      throw err;
     }
-    if (!ewalletType && !(bankName && accountNumber && accountName)) {
-      return reply.code(400).send({
-        error: "Isi salah satu: detail bank lengkap, atau tipe e-wallet.",
-      });
-    }
-
-    const member = await prisma.member.findUnique({ where: { id: memberId } });
-    if (!member) return reply.code(404).send({ error: "Member tidak ditemukan" });
-
-    if (points > member.referralPointsBalance) {
-      return reply.code(400).send({
-        error: `Saldo poin referral tidak cukup. Saldo kamu: ${member.referralPointsBalance} poin.`,
-      });
-    }
-    if (points > member.spendablePoints) {
-      return reply.code(400).send({
-        error: "Saldo poin aktif tidak cukup (mungkin sebagian sudah terpakai untuk potong nota/voucher).",
-      });
-    }
-
-    const amountRupiah = points * POINT_VALUE_RUPIAH;
-
-    const cashout = await prisma.$transaction(async (tx) => {
-      const request = await tx.cashoutRequest.create({
-        data: {
-          memberId,
-          pointsRequested: points,
-          amountRupiah,
-          bankName,
-          accountNumber,
-          accountName,
-          ewalletType,
-          status: "pending",
-        },
-      });
-
-      // Poin langsung dikunci dari kedua saldo begitu request dibuat, supaya
-      // tidak bisa dipakai dobel (potong nota) sambil nunggu approval admin.
-      await tx.member.update({
-        where: { id: memberId },
-        data: {
-          spendablePoints: { decrement: points },
-          referralPointsBalance: { decrement: points },
-        },
-      });
-
-      await tx.pointsTransaction.create({
-        data: {
-          memberId,
-          type: "REDEEM_CASHOUT",
-          spendableDelta: -points,
-          lifetimeDelta: 0,
-          note: `Request cashout Rp${amountRupiah.toLocaleString("id-ID")} (menunggu approval admin)`,
-          createdBy: "system",
-        },
-      });
-
-      return request;
-    });
-
-    return reply.send({
-      cashoutId: cashout.id,
-      pointsRequested: cashout.pointsRequested,
-      amountRupiah: cashout.amountRupiah,
-      status: cashout.status,
-      message: "Request cashout berhasil dikirim, akan diproses admin 1-2 hari kerja.",
-    });
   });
 
   // ============================================================
-  // BARU (Poin 5 - Strict Redeem Lock): preview batas potong nota
-  // sebelum benar-benar submit. FE katalog & checkout WAJIB panggil
-  // ini dulu untuk tahu batas pasti sebelum menampilkan opsi ke user.
-  // ============================================================
-  app.get<{ Querystring: { amount: string } }>("/api/member/redeem-preview", async (req, reply) => {
-    const { memberId } = req.user as { memberId: string };
-    const amount = Number(req.query.amount);
-
-    if (!amount || amount <= 0) {
-      return reply.code(400).send({ error: "Parameter amount wajib diisi & > 0" });
-    }
-
-    const member = await prisma.member.findUnique({ where: { id: memberId } });
-    if (!member) return reply.code(404).send({ error: "Member tidak ditemukan" });
-
-    const maxPercent = maxRedeemPercentFor(member.tier);
-    const maxRupiahByTier = Math.floor(amount * maxPercent);
-    const maxPointsByTier = Math.floor(maxRupiahByTier / POINT_VALUE_RUPIAH);
-    const maxPointsUsable = Math.min(maxPointsByTier, member.spendablePoints);
-
-    return reply.send({
-      orderAmount: amount,
-      tier: member.tier,
-      maxRedeemPercent: maxPercent,
-      maxRupiahByTier,
-      maxPointsByTier,
-      memberSpendablePoints: member.spendablePoints,
-      maxPointsUsable,
-      maxRupiahUsable: maxPointsUsable * POINT_VALUE_RUPIAH,
-    });
-  });
-
-  // ============================================================
-  // BARU: Cloud Storage Preview — file master milik member
+  // Cloud Storage Preview — file master milik member
   // ============================================================
   app.get("/api/member/files", async (req, reply) => {
     const { memberId } = req.user as { memberId: string };
