@@ -47,6 +47,7 @@ export function serializeMember(member: {
   referralCode?: string | null;
   referralPointsBalance?: number;
   referralPointsLocked?: number;
+  photoUrl?: string | null;
 }) {
   const progress = tierProgress(member.lifetimePoints);
   const referralPointsBalance = member.referralPointsBalance ?? 0;
@@ -67,6 +68,7 @@ export function serializeMember(member: {
     referralCode: member.referralCode ?? null,
     referralPointsBalance,
     referralPointsLocked,
+    photoUrl: member.photoUrl ?? null,
     cashout: {
       minPoints: CASHOUT_MIN_POINTS,
       minRupiah: CASHOUT_MIN_RUPIAH,
