@@ -1,8 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { prisma } from "../lib/prisma";
-import { addPoints } from "../lib/points";
+import { addPoints, CASHOUT_MIN_POINTS, CASHOUT_MIN_RUPIAH } from "../lib/points";
 import { tierLabel, tierProgress, POINT_VALUE_RUPIAH } from "../lib/tier";
-import { CASHOUT_MIN_POINTS, CASHOUT_MIN_RUPIAH } from "../lib/points";
 
 const WELCOME_BONUS_POINTS = Number(process.env.WELCOME_BONUS_POINTS ?? 500);
 
@@ -47,9 +46,12 @@ export function serializeMember(member: {
   lifetimePoints: number;
   referralCode?: string | null;
   referralPointsBalance?: number;
+  referralPointsLocked?: number;
 }) {
   const progress = tierProgress(member.lifetimePoints);
   const referralPointsBalance = member.referralPointsBalance ?? 0;
+  const referralPointsLocked = member.referralPointsLocked ?? 0;
+  const cashoutEligiblePoints = Math.max(0, referralPointsBalance - referralPointsLocked);
 
   return {
     id: member.id,
@@ -64,10 +66,12 @@ export function serializeMember(member: {
     pointsToNextTier: progress.pointsToNext,
     referralCode: member.referralCode ?? null,
     referralPointsBalance,
+    referralPointsLocked,
     cashout: {
       minPoints: CASHOUT_MIN_POINTS,
       minRupiah: CASHOUT_MIN_RUPIAH,
-      eligible: referralPointsBalance >= CASHOUT_MIN_POINTS,
+      cashoutEligiblePoints,
+      eligible: cashoutEligiblePoints >= CASHOUT_MIN_POINTS,
     },
   };
 }
