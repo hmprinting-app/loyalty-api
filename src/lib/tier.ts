@@ -33,19 +33,17 @@ export function tierLabel(tier: Tier): string {
   return LABELS[tier] ?? tier;
 }
 
-// Multiplier earn poin per tier. Nilai disamakan dengan sistem lama supaya
-// member yang sudah ada TIDAK berubah rate poin-nya setelah migrasi:
-//   - Range 5.000-14.999 dulu SILVER_IVORY (1.2x) -> sekarang GOLD (1.2x)
-//   - Range 15.000+       dulu GOLD_FOIL   (1.5x) -> sekarang PLATINUM (1.5x)
-//   - Range 0-4.999       dulu BRONZE_PAPER (1.0x) -> sekarang SOBAT & SILVER (1.0x)
+// Multiplier earn poin per tier — disamakan dengan klaim benefit yang
+// ditampilkan di modal "Lihat Benefit" pada PWA (Poin 2 enhancement).
 const MULTIPLIERS: Record<string, number> = {
   SOBAT: 1.0,
-  SILVER: 1.0,
-  GOLD: 1.2,
-  PLATINUM: 1.5,
+  SILVER: 1.25,
+  GOLD: 1.5,
+  PLATINUM: 2.0,
+  // fallback untuk member yang belum ke-backfill (value lama, sebelum sistem 4-tier)
   BRONZE_PAPER: 1.0,
-  SILVER_IVORY: 1.2,
-  GOLD_FOIL: 1.5,
+  SILVER_IVORY: 1.5,
+  GOLD_FOIL: 2.0,
 };
 
 export function multiplierFor(tier: Tier): number {
