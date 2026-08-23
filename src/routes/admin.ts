@@ -628,4 +628,329 @@ export default async function adminRoutes(app: FastifyInstance) {
       throw err;
     }
   });
+
+  // ============================================================
+  // BARU — CRUD Produk Katalog (Poin 1: Variant Selector Shopee-style)
+  // ============================================================
+
+  // Buat/replace 1 produk (upsert by slug) — dipakai buat nambah produk baru
+  // ATAU update harga/varian produk yang sudah ada, cukup panggil ulang
+  // dengan slug yang sama.
+  app.post<{
+    Body: {
+      slug: string;
+      name: string;
+      category: "HM_BOOKS_PRINTING" | "PACKAGING" | "PROMOSI_LAINNYA";
+      badge?: string;
+      description?: string;
+      image?: string;
+      unit?: string;
+      variantGroups: any;
+      priceConfig: any;
+      active?: boolean;
+    };
+  }>("/api/admin/products", async (req, reply) => {
+    const { slug, name, category, badge, description, image, unit, variantGroups, priceConfig, active } = req.body;
+    if (!slug || !name || !category || !variantGroups || !priceConfig) {
+      return reply.code(400).send({ error: "slug, name, category, variantGroups, priceConfig wajib diisi" });
+    }
+
+    const product = await prisma.product.upsert({
+      where: { slug },
+      create: {
+        slug,
+        name,
+        category,
+        badge,
+        description,
+        image,
+        unit: unit ?? "pcs",
+        variantGroups,
+        priceConfig,
+        active: active ?? true,
+      },
+      update: {
+        name,
+        category,
+        badge,
+        description,
+        image,
+        unit: unit ?? "pcs",
+        variantGroups,
+        priceConfig,
+        active: active ?? true,
+      },
+    });
+
+    return reply.send(product);
+  });
+
+  app.get<{ Querystring: { category?: string } }>("/api/admin/products", async (req, reply) => {
+    const products = await prisma.product.findMany({
+      where: req.query.category ? { category: req.query.category as any } : {},
+      orderBy: { createdAt: "asc" },
+    });
+    return reply.send(products);
+  });
+
+  app.delete<{ Params: { slug: string } }>("/api/admin/products/:slug", async (req, reply) => {
+    const product = await prisma.product.findUnique({ where: { slug: req.params.slug } });
+    if (!product) return reply.code(404).send({ error: "Produk tidak ditemukan" });
+    await prisma.product.delete({ where: { slug: req.params.slug } });
+    return reply.send({ deleted: true, slug: req.params.slug });
+  });
+
+  // Toggle aktif/nonaktif produk tanpa perlu kirim ulang semua field
+  app.post<{ Params: { slug: string }; Body: { active: boolean } }>(
+    "/api/admin/products/:slug/active",
+    async (req, reply) => {
+      const product = await prisma.product.update({
+        where: { slug: req.params.slug },
+        data: { active: req.body.active },
+      });
+      return reply.send(product);
+    },
+  );
+
+  // ============================================================
+  // BARU — Seeder 6 produk kategori "HM Books & Printing" dengan Variant
+  // Selector Shopee-style. SEMUA ANGKA DI SINI ADALAH CONTOH/PLACEHOLDER
+  // supaya sistemnya bisa langsung dites end-to-end — Bos CH WAJIB cek &
+  // ganti ke harga riil lewat POST /api/admin/products (kirim ulang slug
+  // yang sama dengan priceConfig baru).
+  //
+  // Perhatikan: Undangan & ID Card SENGAJA tidak dikasih dimensi "Halaman"
+  // karena memang bukan produk berhalaman — sistemnya generik, jadi tiap
+  // produk cuma pakai dimensi variant yang relevan buat produk itu.
+  // ============================================================
+  app.post("/api/admin/maintenance/seed-books-printing-catalog", async (req, reply) => {
+    const sizeMultiplierGroup = (extraOptions?: { value: string; label: string }[]) => ({
+      key: "size",
+      label: "Ukuran",
+      kind: "multiplier",
+      options: [
+        { value: "A5", label: "A5" },
+        { value: "B5", label: "B5" },
+        { value: "A4", label: "A4" },
+        ...(extraOptions ?? []),
+      ],
+    });
+
+    const coverGroup = (label = "Tipe Cover", options?: { value: string; label: string }[]) => ({
+      key: "cover",
+      label,
+      kind: "multiplier",
+      options: options ?? [
+        { value: "SOFTCOVER", label: "Softcover" },
+        { value: "HARDCOVER", label: "Hardcover" },
+      ],
+    });
+
+    const pageRangeGroup = (options: { value: string; label: string }[]) => ({
+      key: "pageRange",
+      label: "Jumlah Halaman",
+      kind: "pageBracket",
+      options,
+    });
+
+    const qtyGroup = (options: { value: string; label: string }[]) => ({
+      key: "qty",
+      label: "Kuantitas",
+      kind: "quantity",
+      options: [...options, { value: "custom", label: "Custom" }],
+    });
+
+    const standardPageOptions = [
+      { value: "1-50", label: "1 - 50 hlm" },
+      { value: "51-100", label: "51 - 100 hlm" },
+      { value: "101-150", label: "101 - 150 hlm" },
+      { value: "151-200", label: "151 - 200 hlm" },
+    ];
+    const standardPageBracketAdd = { pageRange: { "1-50": 0, "51-100": 3000, "101-150": 6000, "151-200": 9500 } };
+
+    const bookQtyOptions = [
+      { value: "10", label: "10 - 24 pcs" },
+      { value: "25", label: "25 - 49 pcs" },
+      { value: "50", label: "50 - 99 pcs" },
+      { value: "100", label: "100+ pcs" },
+    ];
+    const standardQuantityBreaks = [
+      { minQty: 1, discountPercent: 0 },
+      { minQty: 25, discountPercent: 5 },
+      { minQty: 50, discountPercent: 10 },
+      { minQty: 100, discountPercent: 15 },
+    ];
+
+    const products = [
+      {
+        slug: "buku-custom",
+        name: "Buku Custom",
+        category: "HM_BOOKS_PRINTING",
+        badge: "On-Demand Printing",
+        description: "Cetak buku satuan/tiras terbatas — pilih ukuran, jumlah halaman, dan tipe cover sesuai kebutuhan.",
+        unit: "buku",
+        variantGroups: [sizeMultiplierGroup(), pageRangeGroup(standardPageOptions), coverGroup(), qtyGroup(bookQtyOptions)],
+        priceConfig: {
+          baseUnitPrice: 12000,
+          factors: { size: { A5: 1, B5: 1.25, A4: 1.6 }, cover: { SOFTCOVER: 1, HARDCOVER: 1.35 } },
+          pageBracketAdd: standardPageBracketAdd,
+          quantityBreaks: standardQuantityBreaks,
+        },
+      },
+      {
+        slug: "buku-tahunan",
+        name: "Buku Tahunan (Yearbook)",
+        category: "HM_BOOKS_PRINTING",
+        badge: "High Visual • Best Seller",
+        description: "Cetak full color, cocok untuk SMP/SMA/Kampus. Hard cover laminating, binding kuat anti rontok.",
+        unit: "buku",
+        variantGroups: [sizeMultiplierGroup(), pageRangeGroup(standardPageOptions), coverGroup(), qtyGroup(bookQtyOptions)],
+        priceConfig: {
+          baseUnitPrice: 45000,
+          factors: { size: { A5: 1, B5: 1.2, A4: 1.5 }, cover: { SOFTCOVER: 1, HARDCOVER: 1.35 } },
+          pageBracketAdd: standardPageBracketAdd,
+          quantityBreaks: standardQuantityBreaks,
+        },
+      },
+      {
+        slug: "notebook",
+        name: "Notebook / Buku Catatan Custom",
+        category: "HM_BOOKS_PRINTING",
+        badge: "Corporate Gift • Merchandise",
+        description: "Notebook custom cover & isi, cocok untuk merchandise perusahaan atau seminar kit.",
+        unit: "pcs",
+        variantGroups: [
+          sizeMultiplierGroup(),
+          pageRangeGroup([
+            { value: "1-50", label: "1 - 50 lbr" },
+            { value: "51-100", label: "51 - 100 lbr" },
+            { value: "101-150", label: "101 - 150 lbr" },
+          ]),
+          coverGroup(),
+          qtyGroup(bookQtyOptions),
+        ],
+        priceConfig: {
+          baseUnitPrice: 15000,
+          factors: { size: { A5: 1, B5: 1.15, A4: 1.35 }, cover: { SOFTCOVER: 1, HARDCOVER: 1.3 } },
+          pageBracketAdd: { pageRange: { "1-50": 0, "51-100": 2500, "101-150": 5000 } },
+          quantityBreaks: standardQuantityBreaks,
+        },
+      },
+      {
+        slug: "yasin",
+        name: "Buku Yasin & Tahlil",
+        category: "HM_BOOKS_PRINTING",
+        badge: "Hardcover & Hot Print",
+        description: "Cetak buku yasin kenangan tahlilan, cover kain bludru/hot print emas-perak atau kulit sintetis premium.",
+        unit: "pcs",
+        variantGroups: [
+          sizeMultiplierGroup(),
+          pageRangeGroup([
+            { value: "1-40", label: "1 - 40 hlm" },
+            { value: "41-80", label: "41 - 80 hlm" },
+          ]),
+          coverGroup("Tipe Cover", [
+            { value: "SOFTCOVER", label: "Kain Bludru (Hot Print)" },
+            { value: "HARDCOVER", label: "Kulit Sintetis Premium" },
+          ]),
+          qtyGroup(bookQtyOptions),
+        ],
+        priceConfig: {
+          baseUnitPrice: 8500,
+          factors: { size: { A5: 1, B5: 1.1, A4: 1.25 }, cover: { SOFTCOVER: 1, HARDCOVER: 1.3 } },
+          pageBracketAdd: { pageRange: { "1-40": 0, "41-80": 2000 } },
+          quantityBreaks: standardQuantityBreaks,
+        },
+      },
+      {
+        slug: "undangan",
+        name: "Undangan Pernikahan & Event Custom",
+        category: "HM_BOOKS_PRINTING",
+        badge: "Full Finishing",
+        description: "Undangan cetak kilat, art carton tebal & pilihan laminasi/finishing mewah. (Tidak ada dimensi halaman — produk lembaran).",
+        unit: "lbr",
+        variantGroups: [
+          sizeMultiplierGroup(),
+          coverGroup("Jenis Finishing", [
+            { value: "SOFTCOVER", label: "Laminasi Doff" },
+            { value: "HARDCOVER", label: "Emboss + Laminasi Premium" },
+          ]),
+          qtyGroup([
+            { value: "50", label: "50 - 99 lbr" },
+            { value: "100", label: "100 - 249 lbr" },
+            { value: "250", label: "250+ lbr" },
+          ]),
+        ],
+        priceConfig: {
+          baseUnitPrice: 1500,
+          factors: { size: { A5: 1, B5: 1.15, A4: 1.3 }, cover: { SOFTCOVER: 1, HARDCOVER: 1.5 } },
+          quantityBreaks: [
+            { minQty: 1, discountPercent: 0 },
+            { minQty: 100, discountPercent: 8 },
+            { minQty: 250, discountPercent: 15 },
+          ],
+        },
+      },
+      {
+        slug: "id-card",
+        name: "ID Card Custom",
+        category: "HM_BOOKS_PRINTING",
+        badge: "PVC Print • Karyawan/Member/Event",
+        description: "Cetak ID card PVC custom desain, cocok untuk karyawan, member, panitia event. (Ukuran standar CR80 — tidak ada dimensi halaman).",
+        unit: "pcs",
+        variantGroups: [
+          {
+            key: "material",
+            label: "Bahan",
+            kind: "multiplier",
+            options: [
+              { value: "PVC_STANDAR", label: "PVC Standar" },
+              { value: "PVC_RFID", label: "PVC + Chip RFID" },
+            ],
+          },
+          {
+            key: "sisi",
+            label: "Sisi Cetak",
+            kind: "multiplier",
+            options: [
+              { value: "SATU_SISI", label: "1 Sisi" },
+              { value: "DUA_SISI", label: "2 Sisi" },
+            ],
+          },
+          qtyGroup([
+            { value: "25", label: "25 - 49 pcs" },
+            { value: "50", label: "50 - 99 pcs" },
+            { value: "100", label: "100+ pcs" },
+          ]),
+        ],
+        priceConfig: {
+          baseUnitPrice: 5000,
+          factors: {
+            material: { PVC_STANDAR: 1, PVC_RFID: 3.2 },
+            sisi: { SATU_SISI: 1, DUA_SISI: 1.3 },
+          },
+          quantityBreaks: [
+            { minQty: 1, discountPercent: 0 },
+            { minQty: 50, discountPercent: 8 },
+            { minQty: 100, discountPercent: 15 },
+          ],
+        },
+      },
+    ];
+
+    const results: { slug: string; name: string }[] = [];
+    for (const p of products) {
+      await prisma.product.upsert({
+        where: { slug: p.slug },
+        create: p as any,
+        update: p as any,
+      });
+      results.push({ slug: p.slug, name: p.name });
+    }
+
+    return reply.send({
+      message: `${results.length} produk kategori HM Books & Printing dibuat/diperbarui. SEMUA HARGA MASIH CONTOH — cek & sesuaikan lewat POST /api/admin/products sebelum dipakai customer beneran.`,
+      products: results,
+    });
+  });
 }
