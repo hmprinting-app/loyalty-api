@@ -781,6 +781,23 @@ export default async function adminRoutes(app: FastifyInstance) {
       { minQty: 100, discountPercent: 15 },
     ];
 
+    // BARU — contoh grup "Finishing Tambahan" (kind: "addon", multi-select
+    // & opsional). Ini caranya masukin spek di luar kebiasaan seperti Spot
+    // UV, Emboss, Jahit Benang: customer boleh centang lebih dari satu
+    // sekaligus, tiap opsi punya tambahan Rp/pcs sendiri-sendiri. Angka di
+    // sini CONTOH — sesuaikan lewat POST /api/admin/products atau editor.
+    const finishingAddonGroup = () => ({
+      key: "finishing",
+      label: "Finishing Tambahan",
+      kind: "addon",
+      options: [
+        { value: "SPOT_UV", label: "Spot UV" },
+        { value: "EMBOSS", label: "Emboss/Timbul" },
+        { value: "JAHIT_BENANG", label: "Jahit Benang (Smyth Sewn)" },
+      ],
+    });
+    const finishingAddonAdd = { finishing: { SPOT_UV: 2000, EMBOSS: 3500, JAHIT_BENANG: 1500 } };
+
     const products = [
       {
         slug: "buku-custom",
@@ -789,11 +806,12 @@ export default async function adminRoutes(app: FastifyInstance) {
         badge: "On-Demand Printing",
         description: "Cetak buku satuan/tiras terbatas — pilih ukuran, jumlah halaman, dan tipe cover sesuai kebutuhan.",
         unit: "buku",
-        variantGroups: [sizeMultiplierGroup(), pageRangeGroup(standardPageOptions), coverGroup(), qtyGroup(bookQtyOptions)],
+        variantGroups: [sizeMultiplierGroup(), pageRangeGroup(standardPageOptions), coverGroup(), finishingAddonGroup(), qtyGroup(bookQtyOptions)],
         priceConfig: {
           baseUnitPrice: 12000,
           factors: { size: { A5: 1, B5: 1.25, A4: 1.6 }, cover: { SOFTCOVER: 1, HARDCOVER: 1.35 } },
           pageBracketAdd: standardPageBracketAdd,
+          addonAdd: finishingAddonAdd,
           quantityBreaks: standardQuantityBreaks,
         },
       },
@@ -804,11 +822,12 @@ export default async function adminRoutes(app: FastifyInstance) {
         badge: "High Visual • Best Seller",
         description: "Cetak full color, cocok untuk SMP/SMA/Kampus. Hard cover laminating, binding kuat anti rontok.",
         unit: "buku",
-        variantGroups: [sizeMultiplierGroup(), pageRangeGroup(standardPageOptions), coverGroup(), qtyGroup(bookQtyOptions)],
+        variantGroups: [sizeMultiplierGroup(), pageRangeGroup(standardPageOptions), coverGroup(), finishingAddonGroup(), qtyGroup(bookQtyOptions)],
         priceConfig: {
           baseUnitPrice: 45000,
           factors: { size: { A5: 1, B5: 1.2, A4: 1.5 }, cover: { SOFTCOVER: 1, HARDCOVER: 1.35 } },
           pageBracketAdd: standardPageBracketAdd,
+          addonAdd: finishingAddonAdd,
           quantityBreaks: standardQuantityBreaks,
         },
       },
