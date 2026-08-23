@@ -144,6 +144,29 @@ export default async function adminRoutes(app: FastifyInstance) {
     return reply.send(members);
   });
 
+  // ============================================================
+  // BARU — Set/update foto profil member (Bos CH upload foto asli
+  // customer ke Cloudflare Images / Google Drive / dsb, terus taruh link-nya
+  // di sini). Kalau kosong, PWA otomatis fallback ke avatar inisial nama.
+  // ============================================================
+  app.post<{ Body: { phone: string; photoUrl: string | null } }>(
+    "/api/admin/members/photo",
+    async (req, reply) => {
+      const { phone, photoUrl } = req.body;
+      if (!phone) return reply.code(400).send({ error: "phone wajib diisi" });
+
+      const member = await prisma.member.findUnique({ where: { phone } });
+      if (!member) return reply.code(404).send({ error: "Member dengan nomor ini belum terdaftar" });
+
+      const updated = await prisma.member.update({
+        where: { phone },
+        data: { photoUrl: photoUrl || null },
+      });
+
+      return reply.send({ phone: updated.phone, name: updated.name, photoUrl: updated.photoUrl });
+    },
+  );
+
   app.get<{ Params: { phone: string } }>("/api/admin/members/:phone", async (req, reply) => {
     const member = await prisma.member.findUnique({
       where: { phone: req.params.phone },
