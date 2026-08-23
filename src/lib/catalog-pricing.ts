@@ -32,6 +32,13 @@ export interface VariantGroup {
   label: string;
   kind: VariantGroupKind;
   options: VariantOption[];
+  // BARU — KHUSUS grup kind "addon": kalau "tiered", harga tambahan tiap
+  // opsi addon BEDA-BEDA tergantung kuantitas order (misal Spot UV order 10
+  // buku lebih mahal per-buku daripada order 500 buku, karena biaya setup
+  // plate/cetakan Spot UV itu fixed cost yang dibagi rata ke qty). Kalau
+  // "flat"/tidak diisi (default), addon punya 1 harga tambahan yang sama
+  // berapa pun qty-nya (perilaku lama).
+  pricingMode?: "flat" | "tiered";
 }
 
 export interface QuantityBreak {
@@ -44,11 +51,17 @@ export interface QuantityTierPrice {
   pricePerUnit: number;
 }
 
+// BARU — 1 tier harga tambahan addon di kuantitas tertentu.
+export interface AddonQuantityTierAdd {
+  minQty: number;
+  add: number;
+}
+
 export interface PriceConfig {
   baseUnitPrice: number;
   factors?: Record<string, Record<string, number>>; // [groupKey][value] -> multiplier
   pageBracketAdd?: Record<string, Record<string, number>>; // [groupKey][value] -> tambahan Rp
-  addonAdd?: Record<string, Record<string, number>>; // [groupKey][value] -> tambahan Rp per pcs (kind "addon")
+  addonAdd?: Record<string, Record<string, number | AddonQuantityTierAdd[]>>; // [groupKey][value] -> angka flat, ATAU array tier kalau group.pricingMode === "tiered"
   quantityBreaks: QuantityBreak[]; // urut naik berdasarkan minQty (dipakai di mode "formula")
 
   // ============================================================================
@@ -90,6 +103,27 @@ export interface PriceResult {
   discountAmount: number;
   totalAfterDiscount: number;
   breakdown: PriceBreakdownLine[];
+}
+
+/**
+ * Ambil nominal tambahan Rp untuk 1 opsi addon, di kuantitas tertentu.
+ * Mendukung 2 bentuk data: angka flat (sama berapa pun qty), atau array
+ * tier [{minQty, add}] (beda-beda per rentang kuantitas — dipakai kalau
+ * group.pricingMode === "tiered", misal biaya Spot UV/Emboss yang makin
+ * murah per-pcs kalau qty makin banyak karena ada fixed cost setup).
+ */
+export function resolveAddonAdd(raw: number | AddonQuantityTierAdd[] | undefined, qty: number): number {
+  if (raw === undefined) return 0;
+  if (typeof raw === "number") return raw;
+  if (Array.isArray(raw) && raw.length > 0) {
+    const sorted = [...raw].sort((a, b) => a.minQty - b.minQty);
+    let add = sorted[0].add;
+    for (const tier of sorted) {
+      if (qty >= tier.minQty) add = tier.add;
+    }
+    return add;
+  }
+  return 0;
 }
 
 export class InvalidVariantSelectionError extends Error {}
@@ -157,7 +191,7 @@ export function calculateProductPrice(
         for (const value of values) {
           const option = group.options.find((o) => o.value === value);
           if (!option) continue;
-          const add = product.priceConfig.addonAdd?.[group.key]?.[value] ?? 0;
+          const add = resolveAddonAdd(product.priceConfig.addonAdd?.[group.key]?.[value], qty);
           unitPrice += add;
           breakdown.push({
             groupKey: group.key,
@@ -210,7 +244,7 @@ export function calculateProductPrice(
       for (const value of values) {
         const option = group.options.find((o) => o.value === value);
         if (!option) continue; // abaikan value asing daripada bikin seluruh order gagal
-        const add = product.priceConfig.addonAdd?.[group.key]?.[value] ?? 0;
+        const add = resolveAddonAdd(product.priceConfig.addonAdd?.[group.key]?.[value], qty);
         unitPrice += add;
         breakdown.push({
           groupKey: group.key,
