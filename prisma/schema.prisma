@@ -1,16 +1,21 @@
 generator client {
   provider = "prisma-client-js"
 }
-
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
 enum Tier {
-  BRONZE_PAPER // 0 - 4.999
-  SILVER_IVORY // 5.000 - 14.999 (multiplier 1.2x)
-  GOLD_FOIL // 15.000+ (multiplier 1.5x)
+  BRONZE_PAPER // LEGACY — dipertahankan biar data lama nggak error, sudah tidak dipakai untuk member baru
+  SILVER_IVORY // LEGACY — setara GOLD baru (range sama: 5.000-14.999), dipertahankan untuk histori
+  GOLD_FOIL // LEGACY — setara PLATINUM baru (range sama: 15.000+), dipertahankan untuk histori
+
+  // 4 Level tier aktif (dihitung dari lifetimePoints)
+  SOBAT // 0 - 999      (Craft Paper)   — maks potong nota 15%
+  SILVER // 1.000 - 4.999 (Silver Ivory)  — maks potong nota 25%
+  GOLD // 5.000 - 14.999 (Gold Foil)    — maks potong nota 40%
+  PLATINUM // 15.000+       (Platinum Emboss) — maks potong nota 100% (full redeem)
 }
 
 enum TxType {
@@ -18,7 +23,10 @@ enum TxType {
   EARN_AUTO_KANBAN // dipakai nanti pas integrasi sistem produksi aktif
   EARN_WELCOME
   EARN_TRANSITION
+  EARN_REFERRAL // bonus utk referrer saat referral-nya order pertama
   REDEEM_VOUCHER
+  REDEEM_NOTA // potong nota pakai poin saat checkout
+  REDEEM_CASHOUT // poin referral dicairkan ke bank/e-wallet
   ADJUSTMENT
 }
 
@@ -35,10 +43,23 @@ model Member {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
-  transactions PointsTransaction[]
-  redemptions  Redemption[]
+  // --- REFERRAL PROGRAM ---
+  // referralCode dibuat nullable+unique: member lama akan NULL sampai script
+  // backfill dijalankan (lihat POST /api/admin/maintenance/backfill-tier-referral).
+  // Member baru SELALU dikasih kode otomatis saat dibuat (lihat routes/admin.ts).
+  referralCode          String? @unique
+  referralPointsBalance Int     @default(0) // sub-saldo dari bonus referral, dipakai buat syarat cashout
+  referredById          String?
+  referredBy            Member? @relation("Referrals", fields: [referredById], references: [id])
+  referrals             Member[] @relation("Referrals")
+
+  transactions    PointsTransaction[]
+  redemptions     Redemption[]
+  cashoutRequests CashoutRequest[]
+  cloudFiles      CloudFile[]
 
   @@index([magicToken])
+  @@index([referredById])
 }
 
 model PointsTransaction {
@@ -57,16 +78,15 @@ model PointsTransaction {
 }
 
 model Voucher {
-  id         String   @id @default(cuid())
-  title      String
-  costPoints Int
-  stock      Int
-  minSpend   String?
-  code       String
-  tierMin    Tier? // null = semua tier boleh tukar
-  active     Boolean  @default(true)
-  createdAt  DateTime @default(now())
-
+  id          String       @id @default(cuid())
+  title       String
+  costPoints  Int
+  stock       Int
+  minSpend    String?
+  code        String
+  tierMin     Tier? // null = semua tier boleh tukar
+  active      Boolean      @default(true)
+  createdAt   DateTime     @default(now())
   redemptions Redemption[]
 }
 
@@ -80,6 +100,42 @@ model Redemption {
   redeemCode  String   @unique // ditunjukin admin/kasir saat customer klaim
   status      String   @default("pending") // pending | used | expired
   redeemedAt  DateTime @default(now())
+
+  @@index([memberId])
+}
+
+// Request pencairan poin referral ke bank/e-wallet. Diproses manual oleh admin
+// (approve/reject) sesuai skala solo-operator saat ini — lihat routes/admin.ts.
+model CashoutRequest {
+  id              String    @id @default(cuid())
+  memberId        String
+  member          Member    @relation(fields: [memberId], references: [id])
+  pointsRequested Int
+  amountRupiah    Int
+  bankName        String?
+  accountNumber   String?
+  accountName     String?
+  ewalletType     String?
+  status          String    @default("pending") // pending | approved | rejected | paid
+  adminNote       String?
+  processedAt     DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([memberId])
+}
+
+// "Cloud Storage Preview" — cuma nyimpen metadata + link (Google Drive/S3/dll),
+// bukan hosting file itu sendiri. Admin input record ini tiap selesai garap
+// desain master / proof cetak customer.
+model CloudFile {
+  id        String   @id @default(cuid())
+  memberId  String
+  member    Member   @relation(fields: [memberId], references: [id])
+  fileName  String
+  fileUrl   String
+  category  String   @default("Lainnya") // Desain Master | Proof Cetak | Invoice | Lainnya
+  note      String?
+  createdAt DateTime @default(now())
 
   @@index([memberId])
 }
