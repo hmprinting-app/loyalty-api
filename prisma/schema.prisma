@@ -18,7 +18,64 @@ enum Tier {
   PLATINUM // 15.000+       (Platinum Emboss) — maks potong nota 100%  — komisi referral: 2% nilai transaksi teman
 }
 
-enum TxType {
+enum ProductCategory {
+  HM_BOOKS_PRINTING // Buku Custom, Buku Tahunan, Notebook, Yasin, Undangan, ID Card
+  PACKAGING
+  PROMOSI_LAINNYA // Banner, Nota NCR, Stiker, dll — tetap pakai kalkulator lama (material dropdown)
+}
+
+// ============================================================================
+// BARU — Katalog produk config-driven (Poin 1: UI Variant Selector Shopee-style).
+//
+// Kenapa variantGroups & priceConfig disimpan sebagai JSON (bukan tabel
+// terpisah per opsi)? Supaya Bos CH bisa nambah/ubah pilihan ukuran, halaman,
+// cover, atau harga TANPA perlu migration database tiap kali — cukup lewat
+// endpoint admin (lihat routes/admin.ts).
+//
+// Struktur variantGroups (array, urutan = urutan tampil chip di UI):
+//   {
+//     key: "size",              // dipakai sebagai key di object `selection`
+//     label: "Ukuran",          // label yang tampil di UI
+//     kind: "multiplier" | "pageBracket" | "quantity",
+//     options: [ { value: "A5", label: "A5" }, ... ]
+//   }
+//   - kind "multiplier": harga dikali faktor dari priceConfig.factors[key][value]
+//   - kind "pageBracket": harga ditambah nominal dari priceConfig.pageBracketAdd[value]
+//   - kind "quantity": WAJIB PERSIS SATU per produk, chip preset qty + opsi
+//     "custom" yang munculin input angka manual. Dipakai buat hitung diskon
+//     grosir dari priceConfig.quantityBreaks.
+//
+// Struktur priceConfig:
+//   {
+//     baseUnitPrice: number,               // harga dasar per pcs (kombinasi termurah)
+//     factors: { [groupKey]: { [value]: number } },      // untuk kind "multiplier"
+//     pageBracketAdd: { [groupKey]: { [value]: number } }, // untuk kind "pageBracket"
+//     quantityBreaks: [ { minQty: number, discountPercent: number } ] // urut naik
+//   }
+//
+// CATATAN PENTING: semua ANGKA di seeder (lihat
+// POST /api/admin/maintenance/seed-books-printing-catalog) adalah CONTOH/
+// PLACEHOLDER supaya sistemnya bisa langsung dites end-to-end. Bos CH WAJIB
+// ganti ke harga riil lewat POST /api/admin/products/:slug sebelum dipakai
+// customer beneran.
+// ============================================================================
+model Product {
+  id            String          @id @default(cuid())
+  slug          String          @unique
+  name          String
+  category      ProductCategory
+  badge         String?
+  description   String?
+  image         String?
+  unit          String          @default("pcs") // pcs | buku | lbr | m² | dst
+  variantGroups Json // lihat struktur di atas
+  priceConfig   Json // lihat struktur di atas
+  active        Boolean         @default(true)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  @@index([category])
+}
   EARN_MANUAL
   EARN_AUTO_KANBAN // dipakai nanti pas integrasi sistem produksi aktif
   EARN_WELCOME
