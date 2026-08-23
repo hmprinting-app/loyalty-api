@@ -1,59 +1,124 @@
 import { Tier } from "@prisma/client";
 
-// Threshold berdasarkan lifetime points (poin history, tidak pernah berkurang)
+// ============================================================================
+// src/lib/tier.ts
+// 4 Level tier aktif: SOBAT, SILVER, GOLD, PLATINUM (dihitung dari lifetimePoints).
+// Value enum lama (BRONZE_PAPER, SILVER_IVORY, GOLD_FOIL) dipertahankan di
+// Prisma schema untuk histori, dan tetap didukung fallback di semua fungsi di
+// bawah biar tidak ada member yang "nyangkut" kalau backfill belum jalan.
+// ============================================================================
+
+// Urutan dari terendah ke tertinggi
+const TIER_ORDER: Tier[] = ["SOBAT", "SILVER", "GOLD", "PLATINUM"];
+
 export function calcTier(lifetimePoints: number): Tier {
-  if (lifetimePoints >= 15000) return "GOLD_FOIL";
-  if (lifetimePoints >= 5000) return "SILVER_IVORY";
-  return "BRONZE_PAPER";
+  if (lifetimePoints >= 15000) return "PLATINUM";
+  if (lifetimePoints >= 5000) return "GOLD";
+  if (lifetimePoints >= 1000) return "SILVER";
+  return "SOBAT";
 }
 
-// Multiplier dipakai saat poin didapat dari transaksi (manual/auto),
-// TIDAK dipakai untuk welcome bonus / transition reward (jumlah flat).
+const LABELS: Record<string, string> = {
+  SOBAT: "Sobat (Craft Paper)",
+  SILVER: "Silver (Silver Ivory)",
+  GOLD: "Gold (Gold Foil)",
+  PLATINUM: "Platinum (Platinum Emboss)",
+  // fallback untuk member yang belum ke-backfill
+  BRONZE_PAPER: "Sobat (Craft Paper)",
+  SILVER_IVORY: "Gold (Gold Foil)",
+  GOLD_FOIL: "Platinum (Platinum Emboss)",
+};
+
+export function tierLabel(tier: Tier): string {
+  return LABELS[tier] ?? tier;
+}
+
+// Multiplier earn poin per tier. Nilai disamakan dengan sistem lama supaya
+// member yang sudah ada TIDAK berubah rate poin-nya setelah migrasi:
+//   - Range 5.000-14.999 dulu SILVER_IVORY (1.2x) -> sekarang GOLD (1.2x)
+//   - Range 15.000+       dulu GOLD_FOIL   (1.5x) -> sekarang PLATINUM (1.5x)
+//   - Range 0-4.999       dulu BRONZE_PAPER (1.0x) -> sekarang SOBAT & SILVER (1.0x)
+const MULTIPLIERS: Record<string, number> = {
+  SOBAT: 1.0,
+  SILVER: 1.0,
+  GOLD: 1.2,
+  PLATINUM: 1.5,
+  BRONZE_PAPER: 1.0,
+  SILVER_IVORY: 1.2,
+  GOLD_FOIL: 1.5,
+};
+
 export function multiplierFor(tier: Tier): number {
-  switch (tier) {
-    case "GOLD_FOIL":
-      return 1.5;
-    case "SILVER_IVORY":
-      return 1.2;
-    default:
-      return 1;
-  }
+  return MULTIPLIERS[tier] ?? 1.0;
 }
 
-const TIER_RANK: Record<Tier, number> = {
+// Batas maksimal potong nota (% dari total tagihan) per tier
+const MAX_REDEEM_PERCENT: Record<string, number> = {
+  SOBAT: 0.15,
+  SILVER: 0.25,
+  GOLD: 0.4,
+  PLATINUM: 1.0,
+  BRONZE_PAPER: 0.15,
+  SILVER_IVORY: 0.4,
+  GOLD_FOIL: 1.0,
+};
+
+export function maxRedeemPercentFor(tier: Tier): number {
+  return MAX_REDEEM_PERCENT[tier] ?? 0.15;
+}
+
+// Rank untuk perbandingan (dipakai voucher.tierMin gating). Value lama & baru
+// disamakan rank-nya sesuai range yang setara.
+const RANK: Record<string, number> = {
   BRONZE_PAPER: 0,
-  SILVER_IVORY: 1,
-  GOLD_FOIL: 2,
+  SOBAT: 0,
+  SILVER: 1,
+  SILVER_IVORY: 2,
+  GOLD: 2,
+  GOLD_FOIL: 3,
+  PLATINUM: 3,
 };
 
 export function tierRank(tier: Tier): number {
-  return TIER_RANK[tier];
+  return RANK[tier] ?? 0;
 }
 
-export function tierLabel(tier: Tier): string {
-  switch (tier) {
-    case "GOLD_FOIL":
-      return "Gold Foil";
-    case "SILVER_IVORY":
-      return "Silver Ivory";
-    default:
-      return "Bronze Paper";
-  }
+export interface TierProgressResult {
+  nextTier: Tier | null;
+  pointsToNext: number | null;
 }
 
-const TIER_THRESHOLDS = { BRONZE_PAPER: 0, SILVER_IVORY: 5000, GOLD_FOIL: 15000 };
+// Progress dihitung selalu berdasarkan tier BARU (SOBAT/SILVER/GOLD/PLATINUM),
+// supaya UI konsisten walau member.tier di DB masih value lama (sebelum backfill).
+export function tierProgress(lifetimePoints: number): TierProgressResult {
+  const current = calcTier(lifetimePoints);
+  const idx = TIER_ORDER.indexOf(current);
 
-// Info progres ke tier berikutnya, dipakai buat progress bar di UI
-export function tierProgress(lifetimePoints: number) {
-  const tier = calcTier(lifetimePoints);
-  if (tier === "GOLD_FOIL") {
-    return { nextTier: null, pointsToNext: 0, currentFloor: TIER_THRESHOLDS.GOLD_FOIL };
+  if (idx === TIER_ORDER.length - 1) {
+    return { nextTier: null, pointsToNext: null };
   }
-  const nextTier: Tier = tier === "BRONZE_PAPER" ? "SILVER_IVORY" : "GOLD_FOIL";
-  const nextThreshold = TIER_THRESHOLDS[nextTier];
-  return {
-    nextTier,
-    pointsToNext: Math.max(nextThreshold - lifetimePoints, 0),
-    currentFloor: TIER_THRESHOLDS[tier],
-  };
+
+  const nextTier = TIER_ORDER[idx + 1];
+  const nextFloor = FLOORS[nextTier];
+  return { nextTier, pointsToNext: Math.max(0, nextFloor - lifetimePoints) };
+}
+
+const FLOORS: Record<Tier, number> = {
+  SOBAT: 0,
+  SILVER: 1000,
+  GOLD: 5000,
+  PLATINUM: 15000,
+  BRONZE_PAPER: 0,
+  SILVER_IVORY: 5000,
+  GOLD_FOIL: 15000,
+};
+
+export const POINT_VALUE_RUPIAH = 100; // 1 poin = Rp 100
+
+export function pointsToRupiah(points: number): number {
+  return points * POINT_VALUE_RUPIAH;
+}
+
+export function rupiahToPoints(rupiah: number): number {
+  return Math.floor(rupiah / POINT_VALUE_RUPIAH);
 }
