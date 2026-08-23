@@ -39,12 +39,35 @@ export interface QuantityBreak {
   discountPercent: number;
 }
 
+export interface QuantityTierPrice {
+  minQty: number;
+  pricePerUnit: number;
+}
+
 export interface PriceConfig {
   baseUnitPrice: number;
   factors?: Record<string, Record<string, number>>; // [groupKey][value] -> multiplier
   pageBracketAdd?: Record<string, Record<string, number>>; // [groupKey][value] -> tambahan Rp
   addonAdd?: Record<string, Record<string, number>>; // [groupKey][value] -> tambahan Rp per pcs (kind "addon")
-  quantityBreaks: QuantityBreak[]; // urut naik berdasarkan minQty
+  quantityBreaks: QuantityBreak[]; // urut naik berdasarkan minQty (dipakai di mode "formula")
+
+  // ============================================================================
+  // BARU — MODE "matrix": harga Rp/unit diinput LANGSUNG per kombinasi spek +
+  // tier kuantitas (bukan hasil formula kali/tambah). Dipakai kalau harga
+  // TIDAK proporsional/linear — misal Buku Custom A5/60hlm/HVS 1 pcs jauh
+  // lebih mahal per-unit dibanding order 100 pcs spek yang sama, bukan
+  // sekadar "potongan %" tapi struktur biaya yang beda sama sekali.
+  //
+  // - mode default (undefined/"formula"): pakai baseUnitPrice+factors+
+  //   pageBracketAdd+quantityBreaks seperti biasa (linear/proporsional).
+  // - mode "matrix": SEMUA group berkind "multiplier"/"pageBracket" dianggap
+  //   dimensi kombinasi (bukan pengali/penambah lagi). Key kombinasi dibentuk
+  //   dari value tiap dimensi itu digabung "|", contoh: "A5|1-50|HVS|SOFTCOVER".
+  //   matrix[comboKey] berisi daftar harga per tier kuantitas (memakai value
+  //   dari group "quantity" sebagai minQty tier-nya).
+  // ============================================================================
+  mode?: "formula" | "matrix";
+  matrix?: Record<string, QuantityTierPrice[]>;
 }
 
 export interface ProductLike {
@@ -72,6 +95,21 @@ export interface PriceResult {
 export class InvalidVariantSelectionError extends Error {}
 
 /**
+ * Bentuk "kode kombinasi" dari selection, dipakai sebagai key di
+ * priceConfig.matrix. HARUS konsisten urutannya dengan urutan variantGroups
+ * (jangan diacak) supaya key yang dibuat pas nyimpan sama dengan pas dibaca.
+ */
+export function buildComboKey(product: ProductLike, selection: Record<string, string | string[]>): string {
+  const parts: string[] = [];
+  for (const group of product.variantGroups) {
+    if (group.kind === "quantity" || group.kind === "addon") continue;
+    const value = selection[group.key];
+    parts.push(String(value ?? ""));
+  }
+  return parts.join("|");
+}
+
+/**
  * Hitung harga akhir berdasarkan produk (variantGroups + priceConfig) dan
  * pilihan customer. `selection` adalah object { [groupKey]: value } untuk
  * group single-select (multiplier/pageBracket), TAPI untuk group "addon"
@@ -89,6 +127,75 @@ export function calculateProductPrice(
   if (!qty || qty <= 0) {
     throw new InvalidVariantSelectionError("Kuantitas harus lebih dari 0");
   }
+
+  // ==========================================================================
+  // MODE "matrix" — harga diambil LANGSUNG dari tabel yang diinput admin,
+  // bukan dihitung dari formula. Lihat penjelasan di PriceConfig.mode.
+  // ==========================================================================
+  if (product.priceConfig.mode === "matrix") {
+    const comboKey = buildComboKey(product, selection);
+    const tiers = product.priceConfig.matrix?.[comboKey];
+    if (!tiers || tiers.length === 0) {
+      throw new InvalidVariantSelectionError(
+        `Harga untuk kombinasi ini belum diatur admin (kode kombinasi: "${comboKey}"). Hubungi admin buat lengkapi harganya.`,
+      );
+    }
+
+    const sortedTiers = [...tiers].sort((a, b) => a.minQty - b.minQty);
+    let unitPrice = sortedTiers[0].pricePerUnit;
+    for (const tier of sortedTiers) {
+      if (qty >= tier.minQty) unitPrice = tier.pricePerUnit;
+    }
+
+    const breakdown: PriceBreakdownLine[] = [];
+    for (const group of product.variantGroups) {
+      if (group.kind === "quantity") continue;
+
+      if (group.kind === "addon") {
+        const rawValues = selection[group.key];
+        const values = Array.isArray(rawValues) ? rawValues : rawValues ? [rawValues] : [];
+        for (const value of values) {
+          const option = group.options.find((o) => o.value === value);
+          if (!option) continue;
+          const add = product.priceConfig.addonAdd?.[group.key]?.[value] ?? 0;
+          unitPrice += add;
+          breakdown.push({
+            groupKey: group.key,
+            label: group.label,
+            selectedLabel: option.label,
+            effect: add === 0 ? "tidak ada tambahan biaya" : `+Rp${add.toLocaleString("id-ID")}/pcs`,
+          });
+        }
+        continue;
+      }
+
+      const value = selection[group.key];
+      const option = group.options.find((o) => o.value === value);
+      breakdown.push({
+        groupKey: group.key,
+        label: group.label,
+        selectedLabel: option?.label ?? String(value),
+        effect: "sudah termasuk harga kombinasi",
+      });
+    }
+
+    unitPrice = Math.round(unitPrice);
+    const totalAfterDiscount = unitPrice * qty;
+
+    return {
+      unitPrice,
+      qty,
+      totalBeforeDiscount: totalAfterDiscount,
+      discountPercent: 0,
+      discountAmount: 0,
+      totalAfterDiscount,
+      breakdown,
+    };
+  }
+
+  // ==========================================================================
+  // MODE "formula" (default/legacy) — base × faktor + tambahan, seperti semula
+  // ==========================================================================
 
   let unitPrice = product.priceConfig.baseUnitPrice;
   const breakdown: PriceBreakdownLine[] = [];
