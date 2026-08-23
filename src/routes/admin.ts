@@ -296,50 +296,73 @@ export default async function adminRoutes(app: FastifyInstance) {
   });
 
   // ============================================================
-  // BARU (pengganti script CLI): Campaign "Jumat Berkah"
-  // Body: { bulkBuyerPhones?: string[], dryRun?: boolean }
+  // BARU (pengganti script CLI, Poin 6): Campaign "Jumat Berkah"
+  // Body: { bulkBuyerPhones?: string[], bulkUserIds?: string[], dryRun?: boolean }
   // Kasih 50 poin ke SEMUA member yang belum pernah dapat poin sama sekali
   // (lifetimePoints === 0 && spendablePoints === 0), atau 500 poin kalau
-  // nomornya ada di daftar bulkBuyerPhones.
+  // termasuk bulk buyer (dicocokkan via nomor HP ATAU Member ID).
+  //
+  // Diproses per BATCH 100 member (concurrent di dalam batch, berurutan
+  // antar batch) supaya aman untuk ribuan member tanpa timeout ke Postgres
+  // Railway. Kegagalan pada satu member TIDAK menggagalkan seluruh batch —
+  // dicatat di `failures` agar bisa di-retry manual.
   // ============================================================
-  app.post<{ Body: { bulkBuyerPhones?: string[]; dryRun?: boolean } }>(
+  app.post<{ Body: { bulkBuyerPhones?: string[]; bulkUserIds?: string[]; dryRun?: boolean } }>(
     "/api/admin/campaigns/jumat-berkah",
     async (req, reply) => {
       const bulkBuyerPhones = new Set(req.body?.bulkBuyerPhones ?? []);
+      const bulkUserIds = new Set(req.body?.bulkUserIds ?? []);
       const dryRun = req.body?.dryRun ?? false;
+      const BATCH_SIZE = 100;
 
       const eligibleMembers = await prisma.member.findMany({
         where: { lifetimePoints: 0, spendablePoints: 0 },
       });
 
-      const results: { name: string; phone: string; bonus: number; isBulkBuyer: boolean }[] = [];
+      const succeeded: { id: string; name: string; phone: string; bonus: number; isBulkBuyer: boolean }[] = [];
+      const failures: { id: string; name: string; phone: string; error: string }[] = [];
 
-      for (const member of eligibleMembers) {
-        const isBulkBuyer = bulkBuyerPhones.has(member.phone);
-        const bonus = isBulkBuyer ? 500 : 50;
+      // Bagi jadi batch 100 member per grup
+      for (let i = 0; i < eligibleMembers.length; i += BATCH_SIZE) {
+        const batch = eligibleMembers.slice(i, i + BATCH_SIZE);
 
-        if (!dryRun) {
-          await addPoints({
-            memberId: member.id,
-            basePoints: bonus,
-            type: "EARN_MANUAL",
-            note: isBulkBuyer ? "Jumat Berkah - Bulk Buyer" : "Jumat Berkah - Welcome Bonus",
-            createdBy: "system-jumat-berkah",
-          });
-        }
+        await Promise.all(
+          batch.map(async (member) => {
+            const isBulkBuyer = bulkBuyerPhones.has(member.phone) || bulkUserIds.has(member.id);
+            const bonus = isBulkBuyer ? 500 : 50;
 
-        results.push({ name: member.name, phone: member.phone, bonus, isBulkBuyer });
+            try {
+              if (!dryRun) {
+                await addPoints({
+                  memberId: member.id,
+                  basePoints: bonus,
+                  type: "EARN_MANUAL",
+                  note: isBulkBuyer ? "Jumat Berkah - Bulk Buyer" : "Jumat Berkah - Welcome Bonus",
+                  createdBy: "system-jumat-berkah",
+                });
+              }
+              succeeded.push({ id: member.id, name: member.name, phone: member.phone, bonus, isBulkBuyer });
+            } catch (err: any) {
+              failures.push({ id: member.id, name: member.name, phone: member.phone, error: err.message ?? "Unknown error" });
+            }
+          }),
+        );
       }
 
       return reply.send({
         dryRun,
         totalEligible: eligibleMembers.length,
-        normalBonusCount: results.filter((r) => !r.isBulkBuyer).length,
-        bulkBuyerBonusCount: results.filter((r) => r.isBulkBuyer).length,
-        details: results,
+        totalBatches: Math.ceil(eligibleMembers.length / BATCH_SIZE),
+        succeededCount: succeeded.length,
+        failedCount: failures.length,
+        normalBonusCount: succeeded.filter((r) => !r.isBulkBuyer).length,
+        bulkBuyerBonusCount: succeeded.filter((r) => r.isBulkBuyer).length,
+        failures,
         message: dryRun
           ? "Ini DRY RUN — kirim ulang dengan dryRun:false untuk benar-benar kasih poin."
-          : "Selesai! Poin sudah dibagikan ke semua member yang eligible.",
+          : failures.length > 0
+            ? `Selesai dengan ${failures.length} kegagalan — cek field "failures" untuk detail & retry manual.`
+            : "Selesai! Semua member eligible sudah dapat poin tanpa error.",
       });
     },
   );
