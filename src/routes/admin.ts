@@ -1,11 +1,19 @@
 import { FastifyInstance } from "fastify";
 import { prisma } from "../lib/prisma";
-import { addPoints, redeemForNota } from "../lib/points";
-import { TxType } from "@prisma/client";
+import {
+  addPoints,
+  redeemForNota,
+  updateReferralConversionStatus,
+  ConversionNotFoundError,
+  RedeemError,
+} from "../lib/points";
+import { TxType, OrderFulfillmentStatus, OrderPaymentStatus } from "@prisma/client";
 import { generateUniqueReferralCode } from "../lib/referral-code";
 import { calcTier } from "../lib/tier";
 
 const ADMIN_TYPES: TxType[] = ["EARN_MANUAL", "EARN_TRANSITION", "ADJUSTMENT"];
+const VALID_FULFILLMENT: OrderFulfillmentStatus[] = ["PENDING", "IN_PRODUCTION", "COMPLETED", "CANCELLED"];
+const VALID_PAYMENT: OrderPaymentStatus[] = ["UNPAID", "PARTIAL", "PAID", "REFUNDED"];
 
 export default async function adminRoutes(app: FastifyInstance) {
   // Proteksi simpel pakai shared secret di header, BUKAN sistem login admin penuh.
@@ -40,10 +48,8 @@ export default async function adminRoutes(app: FastifyInstance) {
     return reply.send(result);
   });
 
-  // ============================================================
-  // BARU: Potong nota pakai poin (dipanggil admin saat konfirmasi order,
-  // baik manual maupun nanti otomatis dari sistem Kanban)
-  // ============================================================
+  // Potong nota pakai poin (dipanggil admin saat konfirmasi order, baik
+  // manual maupun nanti otomatis dari sistem Kanban)
   app.post<{
     Body: { phone: string; orderAmountRupiah: number; pointsRequested: number; refOrderId?: string };
   }>("/api/admin/points/redeem-nota", async (req, reply) => {
@@ -72,9 +78,8 @@ export default async function adminRoutes(app: FastifyInstance) {
   });
 
   // Buat 1 member baru + magic link-nya (dipakai juga oleh script bulk-import)
-  // BARU: dukung referredByCode -> kalau valid, member baru dapat 50 poin
-  // welcome bonus referral (terpisah dari welcome bonus login 500 poin
-  // untuk member lama - lihat catatan welcomeBonusClaimed di bawah).
+  // Dukung referredByCode -> kalau valid, member baru dapat 50 poin welcome
+  // bonus referral (terpisah dari welcome bonus login 500 poin member lama).
   app.post<{ Body: { phone: string; name: string; referredByCode?: string } }>(
     "/api/admin/members",
     async (req, reply) => {
@@ -104,9 +109,6 @@ export default async function adminRoutes(app: FastifyInstance) {
           name,
           referralCode,
           referredById,
-          // Member yang daftar via referral dianggap signup ORGANIK BARU,
-          // bukan migrasi customer lama -> welcomeBonusClaimed langsung true
-          // biar tidak dobel dapat welcome bonus 500 poin login legacy.
           welcomeBonusClaimed: !!referredById,
         },
       });
@@ -152,7 +154,81 @@ export default async function adminRoutes(app: FastifyInstance) {
   });
 
   // ============================================================
-  // BARU: Approve / Reject Cashout Request
+  // BARU — List & update ReferralConversion (kontrol GEMBOK cashout)
+  // ============================================================
+
+  // List conversion, default yang belum "siap cair" (masih ada kerjaan admin).
+  // Query: ?status=pending (default) | unlocked | all
+  app.get<{ Querystring: { status?: "pending" | "unlocked" | "all" } }>(
+    "/api/admin/referral-conversions",
+    async (req, reply) => {
+      const status = req.query?.status ?? "pending";
+
+      const where =
+        status === "unlocked"
+          ? { orderFulfillmentStatus: "COMPLETED" as const, orderPaymentStatus: "PAID" as const }
+          : status === "all"
+            ? {}
+            : {
+                NOT: { orderFulfillmentStatus: "COMPLETED" as const, orderPaymentStatus: "PAID" as const },
+              };
+
+      const conversions = await prisma.referralConversion.findMany({
+        where,
+        include: {
+          referrer: { select: { name: true, phone: true, tier: true } },
+          referredMember: { select: { name: true, phone: true } },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      });
+      return reply.send(conversions);
+    },
+  );
+
+  // Update status fulfillment/payment 1 conversion. Begitu keduanya
+  // COMPLETED + PAID, gembok poin referrer otomatis lepas (lihat
+  // updateReferralConversionStatus di src/lib/points.ts).
+  app.post<{
+    Params: { id: string };
+    Body: { orderFulfillmentStatus?: OrderFulfillmentStatus; orderPaymentStatus?: OrderPaymentStatus };
+  }>("/api/admin/referral-conversions/:id/status", async (req, reply) => {
+    const { orderFulfillmentStatus, orderPaymentStatus } = req.body;
+
+    if (orderFulfillmentStatus && !VALID_FULFILLMENT.includes(orderFulfillmentStatus)) {
+      return reply.code(400).send({ error: `orderFulfillmentStatus harus salah satu dari: ${VALID_FULFILLMENT.join(", ")}` });
+    }
+    if (orderPaymentStatus && !VALID_PAYMENT.includes(orderPaymentStatus)) {
+      return reply.code(400).send({ error: `orderPaymentStatus harus salah satu dari: ${VALID_PAYMENT.join(", ")}` });
+    }
+    if (!orderFulfillmentStatus && !orderPaymentStatus) {
+      return reply.code(400).send({ error: "Isi minimal salah satu: orderFulfillmentStatus atau orderPaymentStatus" });
+    }
+
+    try {
+      const updated = await updateReferralConversionStatus({
+        conversionId: req.params.id,
+        orderFulfillmentStatus,
+        orderPaymentStatus,
+        updatedBy: "admin",
+      });
+      const unlocked = updated.orderFulfillmentStatus === "COMPLETED" && updated.orderPaymentStatus === "PAID";
+      return reply.send({
+        conversion: updated,
+        message: unlocked
+          ? "Order sudah COMPLETED & PAID — poin referral siap dicairkan."
+          : "Status diperbarui. Poin masih terkunci sampai order COMPLETED & PAID.",
+      });
+    } catch (err: any) {
+      if (err instanceof ConversionNotFoundError) {
+        return reply.code(404).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
+
+  // ============================================================
+  // Approve / Reject Cashout Request
   // ============================================================
   app.post<{ Params: { id: string }; Body: { adminNote?: string } }>(
     "/api/admin/cashouts/:id/approve",
@@ -174,12 +250,14 @@ export default async function adminRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: `Cashout ini sudah berstatus ${cashout.status}` });
       }
 
-      const updated = await prisma.$transaction(async (tx) => {
+      const updated = await prisma.$transaction(async (tx: any) => {
         const rejected = await tx.cashoutRequest.update({
           where: { id: cashout.id },
           data: { status: "rejected", processedAt: new Date(), adminNote: req.body?.adminNote },
         });
-        // Kembalikan poin yang sempat dikunci ke saldo member
+        // Kembalikan poin yang sempat dikunci ke saldo member. Karena poin ini
+        // sudah pernah verified (syarat requestCashout), kembalikan sebagai
+        // saldo BEBAS (tidak perlu balikin ke referralPointsLocked lagi).
         await tx.member.update({
           where: { id: cashout.memberId },
           data: {
@@ -214,7 +292,7 @@ export default async function adminRoutes(app: FastifyInstance) {
   });
 
   // ============================================================
-  // BARU: Upload metadata file master (Cloud Storage Preview)
+  // Upload metadata file master (Cloud Storage Preview)
   // ============================================================
   app.post<{
     Body: { phone: string; fileName: string; fileUrl: string; category?: string; note?: string };
@@ -233,19 +311,13 @@ export default async function adminRoutes(app: FastifyInstance) {
   });
 
   // ============================================================
-  // BARU (pengganti script CLI): Backfill tier & referralCode
-  // Aman dipanggil BERKALI-KALI (idempotent) — hanya menyentuh member yang
-  // tier-nya masih pakai value lama (BRONZE_PAPER/SILVER_IVORY/GOLD_FOIL)
-  // atau belum punya referralCode.
+  // (pengganti script CLI) Backfill tier & referralCode
+  // Aman dipanggil BERKALI-KALI (idempotent).
   // ============================================================
   app.post("/api/admin/maintenance/backfill-tier-referral", async (req, reply) => {
-    const legacyTierMap: Record<string, void> = {};
     const membersToFix = await prisma.member.findMany({
       where: {
-        OR: [
-          { tier: { in: ["BRONZE_PAPER", "SILVER_IVORY", "GOLD_FOIL"] } },
-          { referralCode: null },
-        ],
+        OR: [{ tier: { in: ["BRONZE_PAPER", "SILVER_IVORY", "GOLD_FOIL"] } }, { referralCode: null }],
       },
     });
 
@@ -271,7 +343,6 @@ export default async function adminRoutes(app: FastifyInstance) {
       }
     }
 
-    // Sekalian migrasi tierMin di voucher lama ke value baru yang setara
     const voucherTierMap: Record<string, "SOBAT" | "GOLD" | "PLATINUM"> = {
       BRONZE_PAPER: "SOBAT",
       SILVER_IVORY: "GOLD",
@@ -296,73 +367,131 @@ export default async function adminRoutes(app: FastifyInstance) {
   });
 
   // ============================================================
-  // BARU (pengganti script CLI, Poin 6): Campaign "Jumat Berkah"
-  // Body: { bulkBuyerPhones?: string[], bulkUserIds?: string[], dryRun?: boolean }
-  // Kasih 50 poin ke SEMUA member yang belum pernah dapat poin sama sekali
-  // (lifetimePoints === 0 && spendablePoints === 0), atau 500 poin kalau
-  // termasuk bulk buyer (dicocokkan via nomor HP ATAU Member ID).
-  //
-  // Diproses per BATCH 100 member (concurrent di dalam batch, berurutan
-  // antar batch) supaya aman untuk ribuan member tanpa timeout ke Postgres
-  // Railway. Kegagalan pada satu member TIDAK menggagalkan seluruh batch —
-  // dicatat di `failures` agar bisa di-retry manual.
+  // (pengganti script CLI) Campaign "Jumat Berkah"
   // ============================================================
-  app.post<{ Body: { bulkBuyerPhones?: string[]; bulkUserIds?: string[]; dryRun?: boolean } }>(
+  app.post<{ Body: { bulkBuyerPhones?: string[]; dryRun?: boolean } }>(
     "/api/admin/campaigns/jumat-berkah",
     async (req, reply) => {
       const bulkBuyerPhones = new Set(req.body?.bulkBuyerPhones ?? []);
-      const bulkUserIds = new Set(req.body?.bulkUserIds ?? []);
       const dryRun = req.body?.dryRun ?? false;
-      const BATCH_SIZE = 100;
 
       const eligibleMembers = await prisma.member.findMany({
         where: { lifetimePoints: 0, spendablePoints: 0 },
       });
 
-      const succeeded: { id: string; name: string; phone: string; bonus: number; isBulkBuyer: boolean }[] = [];
-      const failures: { id: string; name: string; phone: string; error: string }[] = [];
+      const results: { name: string; phone: string; bonus: number; isBulkBuyer: boolean }[] = [];
 
-      // Bagi jadi batch 100 member per grup
-      for (let i = 0; i < eligibleMembers.length; i += BATCH_SIZE) {
-        const batch = eligibleMembers.slice(i, i + BATCH_SIZE);
+      for (const member of eligibleMembers) {
+        const isBulkBuyer = bulkBuyerPhones.has(member.phone);
+        const bonus = isBulkBuyer ? 500 : 50;
 
-        await Promise.all(
-          batch.map(async (member) => {
-            const isBulkBuyer = bulkBuyerPhones.has(member.phone) || bulkUserIds.has(member.id);
-            const bonus = isBulkBuyer ? 500 : 50;
+        if (!dryRun) {
+          await addPoints({
+            memberId: member.id,
+            basePoints: bonus,
+            type: "EARN_MANUAL",
+            note: isBulkBuyer ? "Jumat Berkah - Bulk Buyer" : "Jumat Berkah - Welcome Bonus",
+            createdBy: "system-jumat-berkah",
+          });
+        }
 
-            try {
-              if (!dryRun) {
-                await addPoints({
-                  memberId: member.id,
-                  basePoints: bonus,
-                  type: "EARN_MANUAL",
-                  note: isBulkBuyer ? "Jumat Berkah - Bulk Buyer" : "Jumat Berkah - Welcome Bonus",
-                  createdBy: "system-jumat-berkah",
-                });
-              }
-              succeeded.push({ id: member.id, name: member.name, phone: member.phone, bonus, isBulkBuyer });
-            } catch (err: any) {
-              failures.push({ id: member.id, name: member.name, phone: member.phone, error: err.message ?? "Unknown error" });
-            }
-          }),
-        );
+        results.push({ name: member.name, phone: member.phone, bonus, isBulkBuyer });
       }
 
       return reply.send({
         dryRun,
         totalEligible: eligibleMembers.length,
-        totalBatches: Math.ceil(eligibleMembers.length / BATCH_SIZE),
-        succeededCount: succeeded.length,
-        failedCount: failures.length,
-        normalBonusCount: succeeded.filter((r) => !r.isBulkBuyer).length,
-        bulkBuyerBonusCount: succeeded.filter((r) => r.isBulkBuyer).length,
-        failures,
+        normalBonusCount: results.filter((r) => !r.isBulkBuyer).length,
+        bulkBuyerBonusCount: results.filter((r) => r.isBulkBuyer).length,
+        details: results,
         message: dryRun
           ? "Ini DRY RUN — kirim ulang dengan dryRun:false untuk benar-benar kasih poin."
-          : failures.length > 0
-            ? `Selesai dengan ${failures.length} kegagalan — cek field "failures" untuk detail & retry manual.`
-            : "Selesai! Semua member eligible sudah dapat poin tanpa error.",
+          : "Selesai! Poin sudah dibagikan ke semua member yang eligible.",
+      });
+    },
+  );
+
+  // ============================================================
+  // BARU (pengganti seeder CLI) — Seed data demo skema komisi tiering.
+  // Bikin 4 member dummy (satu per tier) + masing-masing 1 teman referral
+  // dengan order pertama senilai Rp 1.000.000, supaya kamu bisa langsung
+  // lihat & tes bedanya komisi flat vs persentase per tier di dashboard.
+  // AMAN dipanggil di lingkungan testing/staging saja — jangan dipanggil di
+  // database produksi yang sudah ada data asli (nomor HP dummy dipakai
+  // supaya tidak bentrok, tapi tetap cek dulu sebelum jalanin di produksi).
+  // ============================================================
+  app.post<{ Body: { demoOrderAmountRupiah?: number } }>(
+    "/api/admin/maintenance/seed-referral-tier-demo",
+    async (req, reply) => {
+      const orderAmount = req.body?.demoOrderAmountRupiah ?? 1_000_000;
+      const tiers: { tier: "SOBAT" | "SILVER" | "GOLD" | "PLATINUM"; lifetimePoints: number }[] = [
+        { tier: "SOBAT", lifetimePoints: 500 },
+        { tier: "SILVER", lifetimePoints: 2000 },
+        { tier: "GOLD", lifetimePoints: 8000 },
+        { tier: "PLATINUM", lifetimePoints: 20000 },
+      ];
+
+      const created: any[] = [];
+
+      for (const t of tiers) {
+        const referrerPhone = `62800${t.tier.slice(0, 3)}0001`.slice(0, 15);
+        const friendPhone = `62800${t.tier.slice(0, 3)}0002`.slice(0, 15);
+
+        let referrer = await prisma.member.findUnique({ where: { phone: referrerPhone } });
+        if (!referrer) {
+          referrer = await prisma.member.create({
+            data: {
+              phone: referrerPhone,
+              name: `Demo Referrer ${t.tier}`,
+              tier: t.tier,
+              lifetimePoints: t.lifetimePoints,
+              spendablePoints: t.lifetimePoints,
+              referralCode: await generateUniqueReferralCode(`Demo ${t.tier}`),
+              welcomeBonusClaimed: true,
+            },
+          });
+        }
+
+        let friend = await prisma.member.findUnique({ where: { phone: friendPhone } });
+        if (!friend) {
+          friend = await prisma.member.create({
+            data: {
+              phone: friendPhone,
+              name: `Demo Teman ${t.tier}`,
+              referredById: referrer.id,
+              welcomeBonusClaimed: true,
+            },
+          });
+        }
+
+        const alreadyHasConversion = await prisma.referralConversion.findUnique({
+          where: { referredMemberId: friend.id },
+        });
+
+        let result = null;
+        if (!alreadyHasConversion) {
+          result = await addPoints({
+            memberId: friend.id,
+            basePoints: Math.floor(orderAmount / 10000), // simulasi 1 poin per Rp10rb dari order Kanban
+            type: "EARN_AUTO_KANBAN",
+            note: "Demo seed - order pertama",
+            createdBy: "system-seed-demo",
+            orderAmountRupiah: orderAmount,
+          });
+        }
+
+        created.push({
+          tier: t.tier,
+          referrer: { phone: referrer.phone, name: referrer.name },
+          friend: { phone: friend.phone, name: friend.name },
+          referralBonus: result?.referralBonus ?? "sudah ada dari seed sebelumnya (idempotent)",
+        });
+      }
+
+      return reply.send({
+        orderAmountRupiah: orderAmount,
+        message: "Demo data dibuat/diverifikasi untuk 4 tier. Cek GET /api/admin/referral-conversions untuk lihat hasil komisinya.",
+        details: created,
       });
     },
   );
