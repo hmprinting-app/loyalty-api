@@ -746,6 +746,19 @@ export default async function adminRoutes(app: FastifyInstance) {
       ],
     });
 
+    // BARU — dimensi "Jenis Kertas" (kind: "multiplier"), sama statusnya
+    // dengan Ukuran/Cover: WAJIB dipilih, dan jadi bagian dari kombinasi
+    // (dipakai juga sebagai salah satu sumbu di mode "Harga per Kombinasi").
+    const paperGroup = (options?: { value: string; label: string }[]) => ({
+      key: "paper",
+      label: "Jenis Kertas",
+      kind: "multiplier",
+      options: options ?? [
+        { value: "HVS", label: "HVS 70gr" },
+        { value: "BOOKPAPER", label: "Bookpaper Cream" },
+      ],
+    });
+
     const pageRangeGroup = (options: { value: string; label: string }[]) => ({
       key: "pageRange",
       label: "Jumlah Halaman",
@@ -794,9 +807,19 @@ export default async function adminRoutes(app: FastifyInstance) {
         { value: "SPOT_UV", label: "Spot UV" },
         { value: "EMBOSS", label: "Emboss/Timbul" },
         { value: "JAHIT_BENANG", label: "Jahit Benang (Smyth Sewn)" },
+        { value: "LAMINASI_DOFF", label: "Laminasi Doff" },
+        { value: "LAMINASI_GLOSSY", label: "Laminasi Glossy" },
       ],
     });
-    const finishingAddonAdd = { finishing: { SPOT_UV: 2000, EMBOSS: 3500, JAHIT_BENANG: 1500 } };
+    const finishingAddonAdd = {
+      finishing: {
+        SPOT_UV: 2000,
+        EMBOSS: 3500,
+        JAHIT_BENANG: 1500,
+        LAMINASI_DOFF: 1000,
+        LAMINASI_GLOSSY: 1000,
+      },
+    };
 
     const products = [
       {
@@ -806,10 +829,10 @@ export default async function adminRoutes(app: FastifyInstance) {
         badge: "On-Demand Printing",
         description: "Cetak buku satuan/tiras terbatas — pilih ukuran, jumlah halaman, dan tipe cover sesuai kebutuhan.",
         unit: "buku",
-        variantGroups: [sizeMultiplierGroup(), pageRangeGroup(standardPageOptions), coverGroup(), finishingAddonGroup(), qtyGroup(bookQtyOptions)],
+        variantGroups: [sizeMultiplierGroup(), pageRangeGroup(standardPageOptions), paperGroup(), coverGroup(), finishingAddonGroup(), qtyGroup(bookQtyOptions)],
         priceConfig: {
           baseUnitPrice: 12000,
-          factors: { size: { A5: 1, B5: 1.25, A4: 1.6 }, cover: { SOFTCOVER: 1, HARDCOVER: 1.35 } },
+          factors: { size: { A5: 1, B5: 1.25, A4: 1.6 }, cover: { SOFTCOVER: 1, HARDCOVER: 1.35 }, paper: { HVS: 1, BOOKPAPER: 1.1 } },
           pageBracketAdd: standardPageBracketAdd,
           addonAdd: finishingAddonAdd,
           quantityBreaks: standardQuantityBreaks,
@@ -822,10 +845,10 @@ export default async function adminRoutes(app: FastifyInstance) {
         badge: "High Visual • Best Seller",
         description: "Cetak full color, cocok untuk SMP/SMA/Kampus. Hard cover laminating, binding kuat anti rontok.",
         unit: "buku",
-        variantGroups: [sizeMultiplierGroup(), pageRangeGroup(standardPageOptions), coverGroup(), finishingAddonGroup(), qtyGroup(bookQtyOptions)],
+        variantGroups: [sizeMultiplierGroup(), pageRangeGroup(standardPageOptions), paperGroup(), coverGroup(), finishingAddonGroup(), qtyGroup(bookQtyOptions)],
         priceConfig: {
           baseUnitPrice: 45000,
-          factors: { size: { A5: 1, B5: 1.2, A4: 1.5 }, cover: { SOFTCOVER: 1, HARDCOVER: 1.35 } },
+          factors: { size: { A5: 1, B5: 1.2, A4: 1.5 }, cover: { SOFTCOVER: 1, HARDCOVER: 1.35 }, paper: { HVS: 1, BOOKPAPER: 1.1 } },
           pageBracketAdd: standardPageBracketAdd,
           addonAdd: finishingAddonAdd,
           quantityBreaks: standardQuantityBreaks,
