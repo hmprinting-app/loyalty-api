@@ -14,7 +14,13 @@
 // yang satunya WAJIB ikut diubah.
 // ============================================================================
 
-export type VariantGroupKind = "multiplier" | "pageBracket" | "quantity";
+// "addon" (BARU) — beda dari 3 kind lain: MULTI-SELECT (customer boleh
+// centang lebih dari satu sekaligus), dipakai untuk spek tambahan di luar
+// kebiasaan yang sifatnya opsional & bisa ditumpuk, misalnya:
+//   Spot UV (+Rp2.000/pcs), Emboss (+Rp3.500/pcs), Jahit Benang (+Rp1.500/pcs)
+// Beda dengan "multiplier"/"pageBracket" yang single-select (pilih 1 dari
+// beberapa opsi wajib), "addon" itu opsional & bisa 0/1/banyak dipilih.
+export type VariantGroupKind = "multiplier" | "pageBracket" | "quantity" | "addon";
 
 export interface VariantOption {
   value: string;
@@ -37,6 +43,7 @@ export interface PriceConfig {
   baseUnitPrice: number;
   factors?: Record<string, Record<string, number>>; // [groupKey][value] -> multiplier
   pageBracketAdd?: Record<string, Record<string, number>>; // [groupKey][value] -> tambahan Rp
+  addonAdd?: Record<string, Record<string, number>>; // [groupKey][value] -> tambahan Rp per pcs (kind "addon")
   quantityBreaks: QuantityBreak[]; // urut naik berdasarkan minQty
 }
 
@@ -67,12 +74,16 @@ export class InvalidVariantSelectionError extends Error {}
 /**
  * Hitung harga akhir berdasarkan produk (variantGroups + priceConfig) dan
  * pilihan customer. `selection` adalah object { [groupKey]: value } untuk
- * SEMUA group non-quantity, dan `qty` adalah angka pcs/buku/lbr final
- * (hasil dari chip preset ATAU input custom kalau customer pilih "custom").
+ * group single-select (multiplier/pageBracket), TAPI untuk group "addon"
+ * (finishing tambahan, multi-select) valuenya berupa ARRAY of string, misal
+ * `selection.finishing = ["SPOT_UV", "EMBOSS"]` (boleh kosong `[]` kalau
+ * customer nggak pilih finishing tambahan apapun — ini SATU-SATUNYA kind
+ * yang boleh kosong, sisanya wajib diisi). `qty` adalah angka pcs/buku/lbr
+ * final (hasil dari chip preset ATAU input custom).
  */
 export function calculateProductPrice(
   product: ProductLike,
-  selection: Record<string, string>,
+  selection: Record<string, string | string[]>,
   qty: number,
 ): PriceResult {
   if (!qty || qty <= 0) {
@@ -85,6 +96,25 @@ export function calculateProductPrice(
   for (const group of product.variantGroups) {
     if (group.kind === "quantity") continue; // qty ditangani terpisah di bawah
 
+    if (group.kind === "addon") {
+      // Multi-select & opsional — boleh array kosong, TIDAK error kalau kosong.
+      const rawValues = selection[group.key];
+      const values = Array.isArray(rawValues) ? rawValues : rawValues ? [rawValues] : [];
+      for (const value of values) {
+        const option = group.options.find((o) => o.value === value);
+        if (!option) continue; // abaikan value asing daripada bikin seluruh order gagal
+        const add = product.priceConfig.addonAdd?.[group.key]?.[value] ?? 0;
+        unitPrice += add;
+        breakdown.push({
+          groupKey: group.key,
+          label: group.label,
+          selectedLabel: option.label,
+          effect: add === 0 ? "tidak ada tambahan biaya" : `+Rp${add.toLocaleString("id-ID")}/pcs`,
+        });
+      }
+      continue;
+    }
+
     const value = selection[group.key];
     const option = group.options.find((o) => o.value === value);
     if (!option) {
@@ -94,7 +124,7 @@ export function calculateProductPrice(
     }
 
     if (group.kind === "multiplier") {
-      const factor = product.priceConfig.factors?.[group.key]?.[value] ?? 1;
+      const factor = product.priceConfig.factors?.[group.key]?.[value as string] ?? 1;
       unitPrice *= factor;
       breakdown.push({
         groupKey: group.key,
@@ -103,7 +133,7 @@ export function calculateProductPrice(
         effect: factor === 1 ? "tidak ada tambahan biaya" : `×${factor}`,
       });
     } else if (group.kind === "pageBracket") {
-      const add = product.priceConfig.pageBracketAdd?.[group.key]?.[value] ?? 0;
+      const add = product.priceConfig.pageBracketAdd?.[group.key]?.[value as string] ?? 0;
       unitPrice += add;
       breakdown.push({
         groupKey: group.key,
