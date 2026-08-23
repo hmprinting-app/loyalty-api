@@ -168,6 +168,16 @@ export async function redeemVoucher(params: { memberId: string; voucherId: strin
  * tagihan sesuai tier member (Sobat 15% / Silver 25% / Gold 40% / Platinum 100%).
  * Dipanggil admin lewat POST /api/admin/points/redeem-nota saat order dikonfirmasi.
  */
+/**
+ * BARU: Potong nota pakai poin saat checkout, dibatasi maksimal % dari total
+ * tagihan sesuai tier member (Sobat 15% / Silver 25% / Gold 40% / Platinum 100%).
+ * Dipanggil admin lewat POST /api/admin/points/redeem-nota saat order dikonfirmasi.
+ *
+ * STRICT LOCK (Poin 5): kalau pointsRequested melebihi batas tier ATAU saldo
+ * member, fungsi ini MELEMPAR RedeemError — TIDAK diam-diam di-clamp ke nilai
+ * maksimal. Ini sengaja, supaya arus kas HM Printing tidak tergerus oleh input
+ * yang salah/nekat dari sisi caller (baik bug FE maupun kesalahan input admin).
+ */
 export async function redeemForNota(params: {
   memberId: string;
   orderAmountRupiah: number;
@@ -177,19 +187,32 @@ export async function redeemForNota(params: {
 }) {
   const { memberId, orderAmountRupiah, pointsRequested, refOrderId, createdBy } = params;
 
+  if (!pointsRequested || pointsRequested <= 0) {
+    throw new RedeemError("pointsRequested harus lebih dari 0");
+  }
+
   return prisma.$transaction(async (tx) => {
     const member = await tx.member.findUniqueOrThrow({ where: { id: memberId } });
     const maxPercent = maxRedeemPercentFor(member.tier);
     const maxRupiah = Math.floor(orderAmountRupiah * maxPercent);
     const maxPoints = Math.floor(maxRupiah / POINT_VALUE_RUPIAH);
-    const pointsToRedeem = Math.max(0, Math.min(pointsRequested, maxPoints, member.spendablePoints));
 
-    if (pointsToRedeem <= 0) {
+    // STRICT LOCK: tolak keras kalau melebihi batas tier (bukan clamp diam-diam)
+    if (pointsRequested > maxPoints) {
       throw new RedeemError(
-        `Poin tidak bisa dipakai untuk nota ini (maks ${maxPoints} poin sesuai tier ${member.tier}, saldo member: ${member.spendablePoints} poin).`,
+        `Penukaran ditolak: ${pointsRequested} poin melebihi batas maksimal tier ${member.tier} ` +
+          `(${Math.round(maxPercent * 100)}% dari nota = maks ${maxPoints} poin / Rp${maxRupiah.toLocaleString("id-ID")}).`,
       );
     }
 
+    // STRICT LOCK: tolak keras kalau saldo poin member tidak cukup
+    if (pointsRequested > member.spendablePoints) {
+      throw new RedeemError(
+        `Penukaran ditolak: saldo poin member (${member.spendablePoints}) tidak cukup untuk menukar ${pointsRequested} poin.`,
+      );
+    }
+
+    const pointsToRedeem = pointsRequested;
     const rupiahValue = pointsToRedeem * POINT_VALUE_RUPIAH;
 
     await tx.pointsTransaction.create({
