@@ -76,6 +76,8 @@ model Product {
 
   @@index([category])
 }
+
+enum TxType {
   EARN_MANUAL
   EARN_AUTO_KANBAN // dipakai nanti pas integrasi sistem produksi aktif
   EARN_WELCOME
