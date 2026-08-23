@@ -2,7 +2,7 @@ import { FastifyInstance } from "fastify";
 import { prisma } from "../lib/prisma";
 import { serializeMember } from "./auth";
 import { CASHOUT_MIN_POINTS, CASHOUT_MIN_RUPIAH } from "../lib/points";
-import { POINT_VALUE_RUPIAH } from "../lib/tier";
+import { POINT_VALUE_RUPIAH, maxRedeemPercentFor } from "../lib/tier";
 
 export default async function memberRoutes(app: FastifyInstance) {
   // Semua route di sini butuh Bearer JWT (didapat dari /api/auth/login)
@@ -171,6 +171,39 @@ export default async function memberRoutes(app: FastifyInstance) {
       amountRupiah: cashout.amountRupiah,
       status: cashout.status,
       message: "Request cashout berhasil dikirim, akan diproses admin 1-2 hari kerja.",
+    });
+  });
+
+  // ============================================================
+  // BARU (Poin 5 - Strict Redeem Lock): preview batas potong nota
+  // sebelum benar-benar submit. FE katalog & checkout WAJIB panggil
+  // ini dulu untuk tahu batas pasti sebelum menampilkan opsi ke user.
+  // ============================================================
+  app.get<{ Querystring: { amount: string } }>("/api/member/redeem-preview", async (req, reply) => {
+    const { memberId } = req.user as { memberId: string };
+    const amount = Number(req.query.amount);
+
+    if (!amount || amount <= 0) {
+      return reply.code(400).send({ error: "Parameter amount wajib diisi & > 0" });
+    }
+
+    const member = await prisma.member.findUnique({ where: { id: memberId } });
+    if (!member) return reply.code(404).send({ error: "Member tidak ditemukan" });
+
+    const maxPercent = maxRedeemPercentFor(member.tier);
+    const maxRupiahByTier = Math.floor(amount * maxPercent);
+    const maxPointsByTier = Math.floor(maxRupiahByTier / POINT_VALUE_RUPIAH);
+    const maxPointsUsable = Math.min(maxPointsByTier, member.spendablePoints);
+
+    return reply.send({
+      orderAmount: amount,
+      tier: member.tier,
+      maxRedeemPercent: maxPercent,
+      maxRupiahByTier,
+      maxPointsByTier,
+      memberSpendablePoints: member.spendablePoints,
+      maxPointsUsable,
+      maxRupiahUsable: maxPointsUsable * POINT_VALUE_RUPIAH,
     });
   });
 
