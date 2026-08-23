@@ -12,10 +12,10 @@ enum Tier {
   GOLD_FOIL // LEGACY — setara PLATINUM baru (range sama: 15.000+), dipertahankan untuk histori
 
   // 4 Level tier aktif (dihitung dari lifetimePoints)
-  SOBAT // 0 - 999      (Craft Paper)   — maks potong nota 15%
-  SILVER // 1.000 - 4.999 (Silver Ivory)  — maks potong nota 25%
-  GOLD // 5.000 - 14.999 (Gold Foil)    — maks potong nota 40%
-  PLATINUM // 15.000+       (Platinum Emboss) — maks potong nota 100% (full redeem)
+  SOBAT // 0 - 999      (Craft Paper)   — maks potong nota 15%   — komisi referral: flat 100 poin
+  SILVER // 1.000 - 4.999 (Silver Ivory)  — maks potong nota 25%   — komisi referral: 1% nilai transaksi teman
+  GOLD // 5.000 - 14.999 (Gold Foil)    — maks potong nota 40%   — komisi referral: 1.5% nilai transaksi teman
+  PLATINUM // 15.000+       (Platinum Emboss) — maks potong nota 100%  — komisi referral: 2% nilai transaksi teman
 }
 
 enum TxType {
@@ -28,6 +28,26 @@ enum TxType {
   REDEEM_NOTA // potong nota pakai poin saat checkout
   REDEEM_CASHOUT // poin referral dicairkan ke bank/e-wallet
   ADJUSTMENT
+}
+
+// Status produksi order teman yang direferensikan. Dipakai sebagai salah satu
+// dari 2 syarat "gembok" cashout (harus COMPLETED).
+enum OrderFulfillmentStatus {
+  PENDING
+  IN_PRODUCTION
+  COMPLETED
+  CANCELLED
+}
+
+// Status pembayaran order teman yang direferensikan. Dipakai sebagai syarat
+// ke-2 "gembok" cashout (harus PAID). Dipisah dari fulfillment karena di
+// dunia nyata percetakan, order bisa selesai produksi duluan sebelum lunas
+// (termin/DP), atau lunas duluan sebelum produksi selesai.
+enum OrderPaymentStatus {
+  UNPAID
+  PARTIAL
+  PAID
+  REFUNDED
 }
 
 model Member {
@@ -48,15 +68,23 @@ model Member {
   // backfill dijalankan (lihat POST /api/admin/maintenance/backfill-tier-referral).
   // Member baru SELALU dikasih kode otomatis saat dibuat (lihat routes/admin.ts).
   referralCode          String? @unique
-  referralPointsBalance Int     @default(0) // sub-saldo dari bonus referral, dipakai buat syarat cashout
+  referralPointsBalance Int     @default(0) // TOTAL poin referral yang pernah didapat (termasuk yang masih terkunci)
+  // BARU — bagian dari referralPointsBalance yang MASIH TERKUNCI karena order
+  // teman terkait belum berstatus COMPLETED & PAID. Poin ini tetap kelihatan
+  // di saldo & tetap bisa dipakai buat potong nota/voucher seperti biasa,
+  // TAPI TIDAK BOLEH ikut diajukan Request Cashout sampai gemboknya lepas.
+  // Formula "siap cair" = referralPointsBalance - referralPointsLocked.
+  referralPointsLocked Int      @default(0)
   referredById          String?
   referredBy            Member? @relation("Referrals", fields: [referredById], references: [id])
   referrals             Member[] @relation("Referrals")
 
-  transactions    PointsTransaction[]
-  redemptions     Redemption[]
-  cashoutRequests CashoutRequest[]
-  cloudFiles      CloudFile[]
+  transactions               PointsTransaction[]
+  redemptions                Redemption[]
+  cashoutRequests            CashoutRequest[]
+  cloudFiles                 CloudFile[]
+  referralConversionsAsReferrer ReferralConversion[] @relation("ReferrerConversions")
+  referralConversionAsReferred  ReferralConversion?  @relation("ReferredConversion")
 
   @@index([magicToken])
   @@index([referredById])
@@ -138,4 +166,36 @@ model CloudFile {
   createdAt DateTime @default(now())
 
   @@index([memberId])
+}
+
+// ============================================================================
+// BARU — Audit trail 1 baris per SATU order pertama teman yang direferensikan.
+// Ini yang jadi "sumber kebenaran" buat:
+//   1) Skema komisi tiering (berapa % / berapa poin flat yang dipakai, dan
+//      tier referrer PADA SAAT itu — supaya histori tidak berubah kalau
+//      tier referrer naik/turun belakangan)
+//   2) Gembok cashout: poin dari conversion ini baru "siap cair" begitu
+//      orderFulfillmentStatus = COMPLETED DAN orderPaymentStatus = PAID
+//      (lihat updateReferralConversionStatus di src/lib/points.ts)
+// ============================================================================
+model ReferralConversion {
+  id                     String                 @id @default(cuid())
+  referrerId             String
+  referrer               Member                 @relation("ReferrerConversions", fields: [referrerId], references: [id])
+  referredMemberId       String                 @unique // 1 conversion per teman (order pertama saja)
+  referredMember         Member                 @relation("ReferredConversion", fields: [referredMemberId], references: [id])
+  orderAmountRupiah      Int
+  referrerTierAtEarn     Tier // snapshot tier referrer saat komisi dihitung
+  commissionPercent      Float? // null kalau pakai flat (tier SOBAT), diisi 0.01/0.015/0.02 untuk tier lain
+  pointsAwarded          Int // hasil akhir poin yang dikreditkan (flat atau dari %)
+  tierRecognized         Boolean                @default(true) // false = tier tidak dikenali, fallback flat SOBAT dipakai
+  orderFulfillmentStatus OrderFulfillmentStatus @default(PENDING)
+  orderPaymentStatus     OrderPaymentStatus     @default(UNPAID)
+  refOrderId             String? // id order dari sistem Kanban, kalau ada
+  pointsUnlockedAt       DateTime? // diisi otomatis begitu status jadi COMPLETED & PAID
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+
+  @@index([referrerId])
+  @@index([orderFulfillmentStatus, orderPaymentStatus])
 }
