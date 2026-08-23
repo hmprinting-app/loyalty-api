@@ -799,10 +799,19 @@ export default async function adminRoutes(app: FastifyInstance) {
     // UV, Emboss, Jahit Benang: customer boleh centang lebih dari satu
     // sekaligus, tiap opsi punya tambahan Rp/pcs sendiri-sendiri. Angka di
     // sini CONTOH — sesuaikan lewat POST /api/admin/products atau editor.
+    // BARU — contoh grup "Finishing Tambahan" (kind: "addon", multi-select
+    // & opsional, pricingMode: "tiered"). Ini caranya masukin spek di luar
+    // kebiasaan seperti Spot UV, Emboss, Jahit Benang, Laminating: customer
+    // boleh centang lebih dari satu sekaligus, DAN harga tambahan tiap opsi
+    // BEDA-BEDA per rentang kuantitas (order 10 buku kena Spot UV jauh lebih
+    // mahal per-buku daripada order 500 buku, karena biaya setup plate itu
+    // fixed cost yang dibagi rata ke qty). Angka di sini CONTOH — sesuaikan
+    // lewat Mode Admin di app atau POST /api/admin/products.
     const finishingAddonGroup = () => ({
       key: "finishing",
       label: "Finishing Tambahan",
       kind: "addon",
+      pricingMode: "tiered",
       options: [
         { value: "SPOT_UV", label: "Spot UV" },
         { value: "EMBOSS", label: "Emboss/Timbul" },
@@ -811,13 +820,40 @@ export default async function adminRoutes(app: FastifyInstance) {
         { value: "LAMINASI_GLOSSY", label: "Laminasi Glossy" },
       ],
     });
+    // Tier di sini mengikuti minQty yang sama dengan bookQtyOptions
+    // (10/25/50/100) supaya nyambung sama chip Kuantitas yang customer lihat.
     const finishingAddonAdd = {
       finishing: {
-        SPOT_UV: 2000,
-        EMBOSS: 3500,
-        JAHIT_BENANG: 1500,
-        LAMINASI_DOFF: 1000,
-        LAMINASI_GLOSSY: 1000,
+        SPOT_UV: [
+          { minQty: 10, add: 3000 },
+          { minQty: 25, add: 2200 },
+          { minQty: 50, add: 1500 },
+          { minQty: 100, add: 900 },
+        ],
+        EMBOSS: [
+          { minQty: 10, add: 4500 },
+          { minQty: 25, add: 3500 },
+          { minQty: 50, add: 2500 },
+          { minQty: 100, add: 1800 },
+        ],
+        JAHIT_BENANG: [
+          { minQty: 10, add: 2000 },
+          { minQty: 25, add: 1700 },
+          { minQty: 50, add: 1400 },
+          { minQty: 100, add: 1000 },
+        ],
+        LAMINASI_DOFF: [
+          { minQty: 10, add: 1500 },
+          { minQty: 25, add: 1200 },
+          { minQty: 50, add: 900 },
+          { minQty: 100, add: 600 },
+        ],
+        LAMINASI_GLOSSY: [
+          { minQty: 10, add: 1500 },
+          { minQty: 25, add: 1200 },
+          { minQty: 50, add: 900 },
+          { minQty: 100, add: 600 },
+        ],
       },
     };
 
