@@ -63,6 +63,12 @@ model Member {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
+  // BARU — foto profil customer asli (link Cloudflare Images/Drive/dsb),
+  // dipasang admin manual saat daftarin member. Nullable: kalau kosong,
+  // PWA otomatis tampilin avatar inisial nama sebagai fallback (bukan
+  // foto stok generic yang tidak related sama membernya).
+  photoUrl String?
+
   // --- REFERRAL PROGRAM ---
   // referralCode dibuat nullable+unique: member lama akan NULL sampai script
   // backfill dijalankan (lihat POST /api/admin/maintenance/backfill-tier-referral).
