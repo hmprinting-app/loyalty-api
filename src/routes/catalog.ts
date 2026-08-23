@@ -35,7 +35,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
   // di index.html) — endpoint ini cuma jadi "penegasan akhir" sebelum order.
   app.post<{
     Params: { slug: string };
-    Body: { selection: Record<string, string>; qty: number };
+    Body: { selection: Record<string, string | string[]>; qty: number };
   }>("/api/catalog/products/:slug/price-check", async (req, reply) => {
     const product = await prisma.product.findUnique({ where: { slug: req.params.slug } });
     if (!product || !product.active) return reply.code(404).send({ error: "Produk tidak ditemukan" });
