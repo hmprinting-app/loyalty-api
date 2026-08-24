@@ -25,6 +25,14 @@ export type VariantGroupKind = "multiplier" | "pageBracket" | "quantity" | "addo
 export interface VariantOption {
   value: string;
   label: string;
+  // BARU — KHUSUS opsi di grup kind "addon": kalau diisi, opsi ini cuma
+  // bisa dipilih kalau qty order >= angka ini (misal Spot UV/Emboss cuma
+  // worth it secara produksi kalau minimal 100 pcs — di bawah itu biaya
+  // setup platnya kemahalan buat dibagi rata). Kalau customer/API tetap
+  // maksa milih opsi ini padahal qty kurang dari minQtyToSelect,
+  // calculateProductPrice akan melempar InvalidVariantSelectionError.
+  // Tidak berlaku buat kind grup lain (multiplier/pageBracket/quantity).
+  minQtyToSelect?: number;
 }
 
 export interface VariantGroup {
@@ -39,6 +47,16 @@ export interface VariantGroup {
   // "flat"/tidak diisi (default), addon punya 1 harga tambahan yang sama
   // berapa pun qty-nya (perilaku lama).
   pricingMode?: "flat" | "tiered";
+
+  // BARU — KHUSUS mode "matrix": kalau di-set `false`, grup ini (walau
+  // kind-nya "multiplier"/"pageBracket") TIDAK ikut dimasukkan ke kode
+  // kombinasi (buildComboKey) dan TIDAK bikin baris sendiri di tabel Harga
+  // per Kombinasi. Customer tetap bisa milih opsinya di variant selector
+  // (misal Jenis Kertas: HVS 70gr / Bookpaper Cream), tapi harganya ikut
+  // kombinasi Ukuran+Halaman+Cover aja — jadi HVS dan Bookpaper harganya
+  // otomatis SAMA. Default (undefined) = true (perilaku lama, tetap ikut
+  // kombinasi). Di mode "formula", flag ini tidak berlaku (tidak dipakai).
+  affectsPrice?: boolean;
 }
 
 export interface QuantityBreak {
@@ -137,6 +155,7 @@ export function buildComboKey(product: ProductLike, selection: Record<string, st
   const parts: string[] = [];
   for (const group of product.variantGroups) {
     if (group.kind === "quantity" || group.kind === "addon") continue;
+    if (group.affectsPrice === false) continue; // BARU: grup ini tidak ikut kode kombinasi
     const value = selection[group.key];
     parts.push(String(value ?? ""));
   }
@@ -191,6 +210,11 @@ export function calculateProductPrice(
         for (const value of values) {
           const option = group.options.find((o) => o.value === value);
           if (!option) continue;
+          if (option.minQtyToSelect !== undefined && qty < option.minQtyToSelect) {
+            throw new InvalidVariantSelectionError(
+              `"${option.label}" cuma bisa dipilih untuk order minimal ${option.minQtyToSelect} pcs (qty saat ini: ${qty}).`,
+            );
+          }
           const add = resolveAddonAdd(product.priceConfig.addonAdd?.[group.key]?.[value], qty);
           unitPrice += add;
           breakdown.push({
@@ -209,7 +233,7 @@ export function calculateProductPrice(
         groupKey: group.key,
         label: group.label,
         selectedLabel: option?.label ?? String(value),
-        effect: "sudah termasuk harga kombinasi",
+        effect: group.affectsPrice === false ? "tidak mempengaruhi harga" : "sudah termasuk harga kombinasi",
       });
     }
 
@@ -244,6 +268,11 @@ export function calculateProductPrice(
       for (const value of values) {
         const option = group.options.find((o) => o.value === value);
         if (!option) continue; // abaikan value asing daripada bikin seluruh order gagal
+        if (option.minQtyToSelect !== undefined && qty < option.minQtyToSelect) {
+          throw new InvalidVariantSelectionError(
+            `"${option.label}" cuma bisa dipilih untuk order minimal ${option.minQtyToSelect} pcs (qty saat ini: ${qty}).`,
+          );
+        }
         const add = resolveAddonAdd(product.priceConfig.addonAdd?.[group.key]?.[value], qty);
         unitPrice += add;
         breakdown.push({
