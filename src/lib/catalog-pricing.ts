@@ -33,6 +33,14 @@ export interface VariantOption {
   // calculateProductPrice akan melempar InvalidVariantSelectionError.
   // Tidak berlaku buat kind grup lain (multiplier/pageBracket/quantity).
   minQtyToSelect?: number;
+
+  // BARU — kalau diisi, opsi ini TIDAK dihitung dari matrix/formula sama
+  // sekali (berapapun datanya, walau matrix-nya kosong ATAU ada isinya).
+  // calculateProductPrice akan langsung balikin PriceResult dengan
+  // `customQuote` berisi pesan ini (BUKAN throw error) — dipakai buat
+  // kasus di luar rentang harga standar (misal "101+ hlm") yang butuh
+  // harga custom dari admin via WA, bukan ditolak/direject ke customer.
+  customQuoteMessage?: string;
 }
 
 export interface VariantGroup {
@@ -121,6 +129,11 @@ export interface PriceResult {
   discountAmount: number;
   totalAfterDiscount: number;
   breakdown: PriceBreakdownLine[];
+
+  // BARU — kalau ada isinya, semua field angka di atas nggak relevan
+  // (dibiarkan 0). Frontend WAJIB cek field ini duluan sebelum nampilin
+  // harga — kalau ada, tampilkan pesan + CTA WA, bukan breakdown harga.
+  customQuote?: { message: string };
 }
 
 /**
@@ -179,6 +192,31 @@ export function calculateProductPrice(
 ): PriceResult {
   if (!qty || qty <= 0) {
     throw new InvalidVariantSelectionError("Kuantitas harus lebih dari 0");
+  }
+
+  // ==========================================================================
+  // CUSTOM QUOTE — cek PALING AWAL, sebelum mode formula/matrix apapun.
+  // Kalau opsi yang dipilih di grup non-quantity/non-addon (misal Jumlah
+  // Halaman "101+ hlm") punya customQuoteMessage, jangan hitung/lookup
+  // harga sama sekali — langsung balikin PriceResult versi "custom quote"
+  // biar frontend nampilin CTA "Chat Admin", bukan reject error.
+  // ==========================================================================
+  for (const group of product.variantGroups) {
+    if (group.kind === "quantity" || group.kind === "addon") continue;
+    const value = selection[group.key];
+    const option = group.options.find((o) => o.value === value);
+    if (option?.customQuoteMessage) {
+      return {
+        unitPrice: 0,
+        qty,
+        totalBeforeDiscount: 0,
+        discountPercent: 0,
+        discountAmount: 0,
+        totalAfterDiscount: 0,
+        breakdown: [],
+        customQuote: { message: option.customQuoteMessage },
+      };
+    }
   }
 
   // ==========================================================================
