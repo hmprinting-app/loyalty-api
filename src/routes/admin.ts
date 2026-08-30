@@ -1031,4 +1031,76 @@ export default async function adminRoutes(app: FastifyInstance) {
       products: results,
     });
   });
+    // ============================================================================
+  // BARU — List & proses NotaRedeemRequest (permintaan potong poin dari
+  // customer, dicatat otomatis oleh endpoint publik POST /api/nota-redeem-requests
+  // saat klik "Pesan via WhatsApp"). Ini yang jadi tombol "Proses" di Mode Admin.
+  // ============================================================================
+
+  // Default cuma yang "pending" (kerjaan yang masih perlu dicek admin).
+  // ?status=processed | cancelled | all buat lihat histori.
+  app.get<{ Querystring: { status?: string } }>("/api/admin/nota-redeem-requests", async (req, reply) => {
+    const status = req.query?.status ?? "pending";
+    const where = status === "all" ? {} : { status };
+    const requests = await prisma.notaRedeemRequest.findMany({
+      where,
+      include: { member: { select: { name: true, phone: true, tier: true, spendablePoints: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+    });
+    return reply.send(requests);
+  });
+
+  // Proses = beneran potong poin (manggil redeemForNota yang sama dengan
+  // yang dipakai /api/admin/points/redeem-nota manual). Cuma bisa diproses
+  // kalau statusnya masih "pending" — mencegah double-potong kalau
+  // tombolnya kepencet 2x atau di-refresh pas lagi loading.
+  app.post<{ Params: { id: string }; Body: { refOrderId?: string } }>(
+    "/api/admin/nota-redeem-requests/:id/process",
+    async (req, reply) => {
+      const request = await prisma.notaRedeemRequest.findUnique({ where: { id: req.params.id } });
+      if (!request) return reply.code(404).send({ error: "Request tidak ditemukan" });
+      if (request.status !== "pending") {
+        return reply.code(400).send({ error: `Request ini sudah berstatus "${request.status}", tidak bisa diproses ulang.` });
+      }
+
+      try {
+        const result = await redeemForNota({
+          memberId: request.memberId,
+          orderAmountRupiah: request.orderAmountRupiah,
+          pointsRequested: request.pointsRequested,
+          refOrderId: req.body?.refOrderId,
+          createdBy: "admin",
+        });
+
+        const updated = await prisma.notaRedeemRequest.update({
+          where: { id: request.id },
+          data: { status: "processed", processedAt: new Date() },
+        });
+
+        return reply.send({ request: updated, redeemResult: result, message: "Poin berhasil dipotong dari nota." });
+      } catch (err: any) {
+        return reply.code(400).send({ error: err.message ?? "Gagal potong poin" });
+      }
+    },
+  );
+
+  // Batalin TANPA potong poin (dipakai kalau order-nya ternyata gak jadi).
+  app.post<{ Params: { id: string }; Body: { adminNote?: string } }>(
+    "/api/admin/nota-redeem-requests/:id/cancel",
+    async (req, reply) => {
+      const request = await prisma.notaRedeemRequest.findUnique({ where: { id: req.params.id } });
+      if (!request) return reply.code(404).send({ error: "Request tidak ditemukan" });
+      if (request.status !== "pending") {
+        return reply.code(400).send({ error: `Request ini sudah berstatus "${request.status}".` });
+      }
+
+      const updated = await prisma.notaRedeemRequest.update({
+        where: { id: request.id },
+        data: { status: "cancelled", adminNote: req.body?.adminNote, processedAt: new Date() },
+      });
+
+      return reply.send({ request: updated, message: "Request dibatalkan, poin tidak dipotong." });
+    },
+  );
 }
