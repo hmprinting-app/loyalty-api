@@ -6,6 +6,7 @@ import memberRoutes from "./routes/member";
 import voucherRoutes from "./routes/vouchers";
 import adminRoutes from "./routes/admin";
 import catalogRoutes from "./routes/catalog";
+import notaRedeemRequestRoutes from "./routes/nota-redeem-requests";
 declare module "fastify" {
   interface FastifyInstance {
     authenticate: (req: any, reply: any) => Promise<void>;
@@ -39,6 +40,7 @@ async function main() {
   await app.register(voucherRoutes);
   await app.register(adminRoutes);
   await app.register(catalogRoutes);
+  await app.register(notaRedeemRequestRoutes);
   const port = Number(process.env.PORT ?? 3000);
   await app.listen({ port, host: "0.0.0.0" });
   app.log.info(`loyalty-api jalan di port ${port}`);
