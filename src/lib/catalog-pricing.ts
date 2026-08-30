@@ -107,6 +107,11 @@ export interface PriceConfig {
   // ============================================================================
   mode?: "formula" | "matrix";
   matrix?: Record<string, QuantityTierPrice[]>;
+
+  // BARU — kalau diisi, order dengan qty DI BAWAH angka ini akan ditolak
+  // (bukan diam-diam dikasih harga tier terendah kayak sebelumnya). Dicek
+  // paling awal di calculateProductPrice, sebelum hitung harga apapun.
+  minOrderQty?: number;
 }
 
 export interface ProductLike {
@@ -134,6 +139,12 @@ export interface PriceResult {
   // (dibiarkan 0). Frontend WAJIB cek field ini duluan sebelum nampilin
   // harga — kalau ada, tampilkan pesan + CTA WA, bukan breakdown harga.
   customQuote?: { message: string };
+
+  // BARU — kalau ada isinya, qty yang dipilih customer di bawah minOrderQty
+  // produk ini. Frontend WAJIB cek field ini SEBELUM customQuote/harga biasa
+  // — tampilkan warning "minimum order X pcs", JANGAN tampilkan harga atau
+  // tombol pesan (karena order ini memang belum valid untuk diproses).
+  belowMinOrder?: { minOrderQty: number; message: string };
 }
 
 /**
@@ -192,6 +203,27 @@ export function calculateProductPrice(
 ): PriceResult {
   if (!qty || qty <= 0) {
     throw new InvalidVariantSelectionError("Kuantitas harus lebih dari 0");
+  }
+
+  // ==========================================================================
+  // MINIMUM ORDER — cek PALING AWAL, sebelum customQuote atau harga apapun.
+  // Beda dari qty tier (yang cuma nentuin HARGA), ini beneran nolak order-nya
+  // kalau qty di bawah batas minimum produk.
+  // ==========================================================================
+  if (product.priceConfig.minOrderQty && qty < product.priceConfig.minOrderQty) {
+    return {
+      unitPrice: 0,
+      qty,
+      totalBeforeDiscount: 0,
+      discountPercent: 0,
+      discountAmount: 0,
+      totalAfterDiscount: 0,
+      breakdown: [],
+      belowMinOrder: {
+        minOrderQty: product.priceConfig.minOrderQty,
+        message: `Minimum order untuk produk ini adalah ${product.priceConfig.minOrderQty} pcs (order kamu: ${qty} pcs).`,
+      },
+    };
   }
 
   // ==========================================================================
