@@ -148,6 +148,7 @@ model Member {
   redemptions                Redemption[]
   cashoutRequests            CashoutRequest[]
   cloudFiles                 CloudFile[]
+  notaRedeemRequests          NotaRedeemRequest[]
   referralConversionsAsReferrer ReferralConversion[] @relation("ReferrerConversions")
   referralConversionAsReferred  ReferralConversion?  @relation("ReferredConversion")
 
@@ -263,4 +264,24 @@ model ReferralConversion {
 
   @@index([referrerId])
   @@index([orderFulfillmentStatus, orderPaymentStatus])
+}
+
+model NotaRedeemRequest {
+  id                String    @id @default(cuid())
+  memberId          String
+  member            Member    @relation(fields: [memberId], references: [id])
+  productSlug       String?
+  productName       String
+  orderSummary      String
+  orderAmountRupiah Int
+  pointsRequested   Int
+  discountRupiah    Int
+  finalTotalRupiah  Int
+  status            String    @default("pending")
+  adminNote         String?
+  processedAt       DateTime?
+  createdAt         DateTime  @default(now())
+
+  @@index([memberId])
+  @@index([status])
 }
