@@ -104,14 +104,15 @@ export default async function adminRoutes(app: FastifyInstance) {
       const referralCode = await generateUniqueReferralCode(name);
 
       const member = await prisma.member.create({
-        data: {
-          phone,
-          name,
-          referralCode,
-          referredById,
-          welcomeBonusClaimed: !!referredById,
-        },
-      });
+  data: {
+    phone,
+    name,
+    tier: "SOBAT", // fix: default schema masih nunjuk ke legacy BRONZE_PAPER
+    referralCode,
+    referredById,
+    welcomeBonusClaimed: !!referredById,
+  },
+});
 
       let welcomeBonusGranted = 0;
       if (referredById) {
@@ -433,7 +434,147 @@ export default async function adminRoutes(app: FastifyInstance) {
       });
     },
   );
+// ============================================================
+// BARU — Bulk credit poin "transition" dari data histori CRM.
+// Dipakai SEKALI SAJA saat launch VIP Club untuk kasih poin ke Sobat
+// yang sudah pernah transaksi sebelum sistem poin ada.
+//
+// Idempotent: member yang SUDAH PERNAH dapat transaksi bertipe
+// EARN_TRANSITION otomatis di-skip, jadi endpoint ini AMAN dipanggil
+// ulang (misal kalau connection putus di tengah / retry) tanpa takut
+// double-credit.
+//
+// Body: array of { phone, name, points }
+// - phone: format 628xxxxxxxxxx (wajib)
+// - name: nama customer dari CRM (wajib)
+// - points: hasil konversi dari formula Bos CH (misal dari total nominal
+//   transaksi historis), sudah dihitung di luar sistem ini sebelum dikirim
+//
+// SELALU dryRun:true dulu untuk preview sebelum eksekusi beneran.
+// ============================================================
+app.post<{
+  Body: {
+    entries: { phone: string; name: string; points: number }[];
+    dryRun?: boolean;
+  };
+}>("/api/admin/campaigns/transition-bulk-credit", async (req, reply) => {
+  const entries = req.body?.entries ?? [];
+  const dryRun = req.body?.dryRun ?? true; // default AMAN: dryRun kalau lupa diisi
 
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return reply.code(400).send({ error: "Body harus berisi array 'entries' dan tidak boleh kosong" });
+  }
+
+  const results: {
+    phone: string;
+    name: string;
+    points: number;
+    status: "credited" | "skipped_already_credited" | "skipped_invalid" | "would_credit";
+    reason?: string;
+    memberId?: string;
+    wasNewMember?: boolean;
+  }[] = [];
+
+  for (const entry of entries) {
+    const { phone, name, points } = entry;
+
+    // --- Validasi dasar per baris, biar 1 baris jelek nggak nge-stop semua ---
+    if (!phone || !name || !points || points <= 0) {
+      results.push({
+        phone: phone ?? "-",
+        name: name ?? "-",
+        points: points ?? 0,
+        status: "skipped_invalid",
+        reason: "phone/name/points tidak lengkap atau points <= 0",
+      });
+      continue;
+    }
+
+    let member = await prisma.member.findUnique({ where: { phone } });
+
+    // --- Cek idempotency: sudah pernah dapat EARN_TRANSITION? ---
+    if (member) {
+      const existingTransition = await prisma.pointsTransaction.findFirst({
+        where: { memberId: member.id, type: "EARN_TRANSITION" },
+      });
+      if (existingTransition) {
+        results.push({
+          phone,
+          name,
+          points,
+          status: "skipped_already_credited",
+          reason: "Member ini sudah pernah dapat poin transition sebelumnya",
+          memberId: member.id,
+        });
+        continue;
+      }
+    }
+
+    if (dryRun) {
+      results.push({
+        phone,
+        name,
+        points,
+        status: "would_credit",
+        memberId: member?.id,
+        wasNewMember: !member,
+      });
+      continue;
+    }
+
+    // --- Eksekusi beneran ---
+    let wasNewMember = false;
+    if (!member) {
+      wasNewMember = true;
+      const referralCode = await generateUniqueReferralCode(name);
+      member = await prisma.member.create({
+        data: {
+          phone,
+          name,
+          tier: "SOBAT",
+          referralCode,
+          welcomeBonusClaimed: true, // sengaja true: ini bukan alur signup normal, jangan sampai auto-trigger welcome bonus lain
+        },
+      });
+    }
+
+    await addPoints({
+      memberId: member.id,
+      basePoints: points,
+      type: "EARN_TRANSITION",
+      note: `Migrasi poin dari histori transaksi CRM sebelum VIP Club aktif`,
+      createdBy: "system-transition-bulk-credit",
+    });
+
+    results.push({
+      phone,
+      name,
+      points,
+      status: "credited",
+      memberId: member.id,
+      wasNewMember,
+    });
+  }
+
+  const summary = {
+    totalEntries: entries.length,
+    credited: results.filter((r) => r.status === "credited").length,
+    wouldCredit: results.filter((r) => r.status === "would_credit").length,
+    skippedAlreadyCredited: results.filter((r) => r.status === "skipped_already_credited").length,
+    skippedInvalid: results.filter((r) => r.status === "skipped_invalid").length,
+    newMembersCreated: results.filter((r) => r.wasNewMember).length,
+  };
+
+  return reply.send({
+    dryRun,
+    summary,
+    message: dryRun
+      ? "Ini DRY RUN — kirim ulang dengan dryRun:false untuk benar-benar kasih poin. Cek summary di atas dulu."
+      : "Selesai! Poin transition sudah dikreditkan. Aman dipanggil ulang lagi kalau ada data susulan — yang sudah dapat poin otomatis di-skip.",
+    results,
+  });
+});
+  
   // ============================================================
   // BARU (pengganti seeder CLI) — Seed data demo skema komisi tiering.
   // Bikin 4 member dummy (satu per tier) + masing-masing 1 teman referral
