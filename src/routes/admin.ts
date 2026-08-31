@@ -1360,4 +1360,47 @@ app.post<{
       return reply.send(redemption);
     },
   );
+    // ============================================================
+  // BARU — Adjustment poin SPENDABLE-ONLY (tidak menyentuh lifetimePoints/
+  // tier). Dipakai untuk koreksi manual seperti mengembalikan poin testing,
+  // atau kompensasi customer, TANPA ikut menaikkan tier (beda dengan
+  // /api/admin/points/add yang selalu menaikkan lifetimePoints juga).
+  // points boleh positif (nambah) atau negatif (mengurangi).
+  // ============================================================
+  app.post<{ Body: { phone: string; points: number; note?: string; createdBy?: string } }>(
+    "/api/admin/points/adjust-spendable-only",
+    async (req, reply) => {
+      const { phone, points, note, createdBy = "admin" } = req.body;
+      if (!points || points === 0) {
+        return reply.code(400).send({ error: "points wajib diisi dan tidak boleh 0" });
+      }
+      const member = await prisma.member.findUnique({ where: { phone } });
+      if (!member) return reply.code(404).send({ error: "Member dengan nomor ini belum terdaftar" });
+
+      if (points < 0 && member.spendablePoints + points < 0) {
+        return reply.code(400).send({
+          error: `Saldo tidak cukup untuk dikurangi. Saldo saat ini: ${member.spendablePoints}, diminta dikurangi: ${Math.abs(points)}.`,
+        });
+      }
+
+      const updated = await prisma.$transaction(async (tx) => {
+        await tx.pointsTransaction.create({
+          data: {
+            memberId: member.id,
+            type: "ADJUSTMENT",
+            spendableDelta: points,
+            lifetimeDelta: 0, // SENGAJA 0 — adjustment ini tidak boleh mengubah lifetime/tier
+            note: note ?? `Adjustment manual: ${points > 0 ? "+" : ""}${points} poin`,
+            createdBy,
+          },
+        });
+        return tx.member.update({
+          where: { id: member.id },
+          data: { spendablePoints: { increment: points } },
+        });
+      });
+
+      return reply.send({ member: updated, message: "Poin berhasil disesuaikan (spendable-only, lifetime tidak berubah)." });
+    },
+  );
 }
