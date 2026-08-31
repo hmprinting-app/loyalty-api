@@ -1296,4 +1296,68 @@ app.post<{
       return reply.send({ request: updated, message: "Request dibatalkan, poin tidak dipotong." });
     },
   );
+    // ============================================================================
+  // BARU — List & fulfill Redemption (klaim voucher poin, kayak "Free Converter
+  // & Layout Setting", "Free Upgrade Shrink Wrap", dll). Beda dengan
+  // NotaRedeemRequest (potong nota) — ini yang dipakai pas customer klik
+  // "Tukar" di daftar Voucher & Penukaran Poin, kode voucher-nya langsung
+  // digenerate saat itu juga oleh redeemVoucher() di lib/points.ts.
+  // ============================================================================
+
+  // Default cuma yang "pending" (kode voucher yang belum diklaim customer ke
+  // Bos CH). ?status=used | expired | all buat lihat histori.
+  app.get<{ Querystring: { status?: string } }>("/api/admin/redemptions", async (req, reply) => {
+    const status = req.query?.status ?? "pending";
+    const where = status === "all" ? {} : { status };
+    const redemptions = await prisma.redemption.findMany({
+      where,
+      include: {
+        member: { select: { name: true, phone: true, tier: true } },
+        voucher: { select: { title: true, costPoints: true } },
+      },
+      orderBy: { redeemedAt: "desc" },
+      take: 200,
+    });
+    return reply.send(redemptions);
+  });
+
+  // Tandain kode voucher sudah diambil/dipakai customer (misal customer
+  // datang/chat nunjukin kode HMVIP-XXXXX, Bos CH kasih barangnya, lalu klik
+  // "Fulfill" di sini). Cuma bisa diproses kalau statusnya masih "pending" —
+  // mencegah 1 kode dipakai berkali-kali kalau ada yang coba klaim ulang.
+  app.post<{ Params: { id: string } }>(
+    "/api/admin/redemptions/:id/fulfill",
+    async (req, reply) => {
+      const redemption = await prisma.redemption.findUnique({ where: { id: req.params.id } });
+      if (!redemption) return reply.code(404).send({ error: "Redemption tidak ditemukan" });
+      if (redemption.status !== "pending") {
+        return reply.code(400).send({ error: `Redemption ini sudah berstatus "${redemption.status}", tidak bisa diproses ulang.` });
+      }
+
+      const updated = await prisma.redemption.update({
+        where: { id: redemption.id },
+        data: { status: "used" },
+      });
+
+      return reply.send({ redemption: updated, message: "Voucher ditandai sudah dipakai/diklaim customer." });
+    },
+  );
+
+  // Cek 1 kode voucher spesifik (dipakai kalau customer chat WA kasih kode-nya
+  // langsung, Bos CH tinggal cek valid/pending atau sudah dipakai, tanpa perlu
+  // scroll cari di daftar panjang).
+  app.get<{ Params: { code: string } }>(
+    "/api/admin/redemptions/by-code/:code",
+    async (req, reply) => {
+      const redemption = await prisma.redemption.findUnique({
+        where: { redeemCode: req.params.code },
+        include: {
+          member: { select: { name: true, phone: true, tier: true } },
+          voucher: { select: { title: true, costPoints: true } },
+        },
+      });
+      if (!redemption) return reply.code(404).send({ error: "Kode voucher tidak ditemukan" });
+      return reply.send(redemption);
+    },
+  );
 }
