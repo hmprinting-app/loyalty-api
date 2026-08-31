@@ -178,6 +178,58 @@ export default async function adminRoutes(app: FastifyInstance) {
   });
 
   // ============================================================
+// BARU — Ambil link personal + info member untuk BANYAK nomor
+// sekaligus. Dipakai setelah bulk credit (transition-bulk-credit,
+// jumat-berkah, dll) buat generate daftar link WA tanpa perlu cek
+// satu-satu manual.
+//
+// Body: { phones: string[] }
+// Nomor yang tidak ditemukan tetap masuk hasil dengan found:false,
+// supaya kelihatan jelas kalau ada yang salah ketik/belum terdaftar.
+// ============================================================
+app.post<{ Body: { phones: string[] } }>(
+  "/api/admin/members/batch-links",
+  async (req, reply) => {
+    const phones = req.body?.phones ?? [];
+    if (!Array.isArray(phones) || phones.length === 0) {
+      return reply.code(400).send({ error: "Body harus berisi array 'phones' dan tidak boleh kosong" });
+    }
+
+    const frontendUrl = process.env.FRONTEND_URL ?? "https://vip.hmprinting.id";
+    const results: {
+      phone: string;
+      found: boolean;
+      name?: string;
+      tier?: string;
+      spendablePoints?: number;
+      personalLink?: string;
+    }[] = [];
+
+    for (const phone of phones) {
+      const member = await prisma.member.findUnique({ where: { phone } });
+      if (!member) {
+        results.push({ phone, found: false });
+        continue;
+      }
+      results.push({
+        phone,
+        found: true,
+        name: member.name,
+        tier: member.tier,
+        spendablePoints: member.spendablePoints,
+        personalLink: `${frontendUrl}/index.html?t=${member.magicToken}`,
+      });
+    }
+
+    return reply.send({
+      totalRequested: phones.length,
+      totalFound: results.filter((r) => r.found).length,
+      totalNotFound: results.filter((r) => !r.found).length,
+      results,
+    });
+  },
+);
+  // ============================================================
   // BARU — List & update ReferralConversion (kontrol GEMBOK cashout)
   // ============================================================
 
