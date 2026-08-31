@@ -20,6 +20,26 @@ declare module "@fastify/jwt" {
 }
 async function main() {
   const app = Fastify({ logger: true });
+  // Fix: Fastify default nolak request kalau Content-Type: application/json
+// tapi body-nya kosong (misal endpoint yang cuma butuh :id dari URL params,
+// kayak POST /api/vouchers/:id/redeem). Override parser biar body kosong
+// dianggap {} alih-alih throw FST_ERR_CTP_EMPTY_JSON_BODY.
+app.addContentTypeParser(
+  "application/json",
+  { parseAs: "string" },
+  function (req, body: string, done) {
+    if (!body || body.trim() === "") {
+      done(null, {});
+      return;
+    }
+    try {
+      const json = JSON.parse(body);
+      done(null, json);
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  }
+);
   await app.register(cors, {
     origin: (process.env.CORS_ORIGIN ?? "*").split(","),
     credentials: true,
